@@ -1,45 +1,40 @@
 import requests
 import os
-from bs4 import BeautifulSoup
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 TARGETS = [
-    {"label": "🟢 外資買進 TOP10", "url": "https://www.esunsec.com.tw/tw-rank/b2brwd/page/rank/chip/0005"},
-    {"label": "🔴 外資賣出 TOP10", "url": "https://www.esunsec.com.tw/tw-rank/b2brwd/page/rank/chip/0006"},
-    {"label": "🟡 投信買進 TOP10", "url": "https://www.esunsec.com.tw/tw-rank/b2brwd/page/rank/chip/0015"},
-    {"label": "🔴 投信賣出 TOP10", "url": "https://www.esunsec.com.tw/tw-rank/b2brwd/page/rank/chip/0016"},
+    {"label": "🟢 外資買進 TOP10", "tag": "rank-chip0005-1"},
+    {"label": "🔴 外資賣出 TOP10", "tag": "rank-chip0006-1"},
+    {"label": "🟡 投信買進 TOP10", "tag": "rank-chip0015-1"},
+    {"label": "🟠 投信賣出 TOP10", "tag": "rank-chip0016-1"},
 ]
+
+BASE_URL = "https://sjis.esunsec.com.tw/b2brwdCommon/jsondata/0c/0f/17/twstockdata.xdjjson"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://www.esunsec.com.tw/",
 }
 
-def scrape_table(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    soup = BeautifulSoup(r.text, "html.parser")
-    table = soup.find("table")
-    if not table:
-        return None
-    rows = table.find_all("tr")[1:11]  # 前10筆，跳過 header
-    results = []
-    for row in rows:
-        cols = [td.get_text(strip=True) for td in row.find_all("td")]
-        if cols:
-            results.append(cols)
-    return results
+def fetch_data(tag):
+    params = {"a": "b", "b": "C", "d": "50", "x": tag, "c": "1"}
+    r = requests.get(BASE_URL, params=params, headers=HEADERS, timeout=30)
+    data = r.json()
+    return data["ResultSet"]["Result"][:10]
 
 def format_message(label, rows):
-    if not rows:
-        return f"{label}\n❌ 無資料（可能是動態渲染）"
     lines = [f"*{label}*"]
+    lines.append("`# 　代碼　　名稱　　　　買賣超(千)`")
+    lines.append("`" + "─" * 34 + "`")
     for i, row in enumerate(rows, 1):
-        code = row[0] if len(row) > 0 else ""
-        name = row[1][:6] if len(row) > 1 else ""
-        amount = row[-1] if len(row) > 2 else ""
-        lines.append(f"`{i:2}. {code:<6} {name:<8} {amount:>10}`")
+        code = row["V2"].replace("AS", "").replace("AP", "")
+        name = row["V3"][:6]
+        amount = f"{int(row['V9']):,}"
+        change = row["V5"]
+        arrow = "▲" if float(change) > 0 else "▼" if float(change) < 0 else "－"
+        lines.append(f"`{i:2}. {code:<6} {name:<7} {arrow} {amount:>10}`")
     return "\n".join(lines)
 
 def send_telegram(text):
@@ -50,20 +45,23 @@ def send_telegram(text):
         "parse_mode": "Markdown"
     }
     r = requests.post(url, json=payload)
-    print(f"Telegram response: {r.status_code} {r.text}")
+    print(f"Telegram: {r.status_code}")
 
 def main():
-    messages = ["📊 *三大法人買賣超排行*（今日）\n"]
+    from datetime import datetime
+    date_str = datetime.now().strftime("%Y/%m/%d")
+    messages = [f"📊 *三大法人買賣超排行*\n🗓 {date_str}"]
+
     for target in TARGETS:
-        print(f"Scraping: {target['label']}")
+        print(f"Fetching: {target['label']}")
         try:
-            rows = scrape_table(target["url"])
+            rows = fetch_data(target["tag"])
             msg = format_message(target["label"], rows)
             messages.append(msg)
         except Exception as e:
-            messages.append(f"❌ {target['label']} 抓取失敗：{e}")
-    full_message = "\n\n".join(messages)
-    send_telegram(full_message)
+            messages.append(f"❌ {target['label']} 失敗：{e}")
+
+    send_telegram("\n\n".join(messages))
     print("Done.")
 
 main()
