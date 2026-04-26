@@ -23,8 +23,8 @@ TARGETS = [
     },
     {
         "label": "🟡 投信買進 TOP10",
-        "url": "https://sjis.esunsec.com.tw/b2brwdCommon/jsondata/09/58/89/twstockdata.xdjjson",
-        "params": {"a": "b", "b": "B", "d": "50", "x": "rank-chip0013-1", "c": "1"}
+        "url": "https://sjis.esunsec.com.tw/b2brwdCommon/jsondata/a2/fc/b7/twstockdata.xdjjson",
+        "params": {"a": "b", "b": "C", "d": "50", "x": "rank-chip0013-1", "c": "1"}
     },
     {
         "label": "🟠 投信賣出 TOP10",
