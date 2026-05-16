@@ -154,20 +154,35 @@ def parse_turnover_page():
 
 def format_turnover_message(rows, now_str):
     if not rows:
-        return f"❌ 成交金額排行抓取失敗"
+        return "❌ 成交金額排行抓取失敗"
 
     lines = [f"💰 *台股成交金額 TOP 10*", f"🕐 {now_str}", ""]
-    lines.append("`排  代碼   股名       漲跌幅    成交金額`")
-    lines.append("`" + "─" * 42 + "`")
+    lines.append("`#  股名        漲跌幅   成交額`")
+    lines.append("`" + "─" * 32 + "`")
 
     for row in rows:
         rank = f"{row['rank']:2}"
-        code = f"{row['code']:<6}"
-        name = f"{row['name'][:5]:<6}"
-        pct = f"{row['change_pct']:>8}"
-        amount = f"{row['amount']:>8}億"
-        arrow = row["arrow"]
-        lines.append(f"`{rank}. {code} {name} {arrow}{pct} {amount}`")
+        name = f"{row['name'][:6]:<7}"
+
+        # 漲跌幅：小數一位，固定寬度
+        pct_raw = row["change_pct"].replace("%", "").replace("+", "").strip()
+        try:
+            pct_val = float(pct_raw)
+            sign = "+" if pct_val > 0 else ""
+            pct_str = f"{sign}{pct_val:.1f}%"
+        except:
+            pct_str = row["change_pct"]
+        pct_display = f"{pct_str:>7}"
+
+        # 成交金額：取整數
+        try:
+            amount_val = int(float(row["amount"].replace(",", "")))
+            amount_str = f"{amount_val}億"
+        except:
+            amount_str = row["amount"] + "億"
+        amount_display = f"{amount_str:>5}"
+
+        lines.append(f"`{rank}. {name}{pct_display} {amount_display}`")
 
     return "\n".join(lines)
 
