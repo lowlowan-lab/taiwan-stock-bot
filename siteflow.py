@@ -22,14 +22,18 @@ URL_OTC      = "https://www.esunsec.com.tw/tw-rank/b2brwd/page/afterHours/market
 # ── Selenium 設定 ──────────────────────────────────────────
 
 def make_driver():
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
     opts = Options()
-    opts.add_argument("--headless")
+    opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1280,800")
+    opts.add_argument("--remote-debugging-port=9222")
     opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    return webdriver.Chrome(options=opts)
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=opts)
 
 # ── 抓資料 ─────────────────────────────────────────────────
 
