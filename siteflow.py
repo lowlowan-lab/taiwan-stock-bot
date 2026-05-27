@@ -1,94 +1,97 @@
-import requests
 import os
 import io
+import time
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from datetime import datetime, timedelta
+import requests
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# ── 抓證交所上市投信買賣超 ─────────────────────────────────
+URL_LISTED   = "https://www.esunsec.com.tw/tw-rank/b2brwd/page/afterHours/market/0001"
+URL_OTC      = "https://www.esunsec.com.tw/tw-rank/b2brwd/page/afterHours/market/0002"
 
-def fetch_twse_trust(date_str):
-    """抓證交所上市投信買賣超，date_str 格式 YYYYMMDD，回傳億元"""
-    url = "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
-    params = {"date": date_str, "type": "day", "response": "json"}
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        data = r.json()
-        if data.get("stat") != "OK":
-            return None
-        for row in data.get("data", []):
-            if row[0].startswith("投信"):
-                net = float(row[3].replace(",", "")) / 1e8  # 元 → 億
-                return net
-        return None
-    except Exception as e:
-        print(f"TWSE trust fetch error {date_str}: {e}")
-        return None
+# ── Selenium 設定 ──────────────────────────────────────────
 
-def fetch_tpex_trust(date_str):
-    """抓櫃買中心上櫃投信買賣超，date_str 格式 YYYYMMDD，回傳億元"""
-    url = "https://www.tpex.org.tw/rwd/zh/fund/BFI82U"
-    params = {"date": date_str, "type": "day", "response": "json"}
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        data = r.json()
-        if data.get("stat") != "OK":
-            return None
-        for row in data.get("data", []):
-            if "投信" in row[0]:
-                net = float(row[3].replace(",", "")) / 1e8  # 元 → 億
-                return net
-        return None
-    except Exception as e:
-        print(f"TPEx trust fetch error {date_str}: {e}")
-        return None
+def make_driver():
+    opts = Options()
+    opts.add_argument("--headless")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1280,800")
+    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    return webdriver.Chrome(options=opts)
 
-# ── 取得過去 N 個交易日 ────────────────────────────────────
+# ── 抓資料 ─────────────────────────────────────────────────
 
-def get_past_trading_days(n=10):
-    """取得過去 n 個交易日（排除週末）"""
-    days = []
-    d = datetime.now()
-    while len(days) < n:
-        if d.weekday() < 5:
-            days.append(d)
-        d -= timedelta(days=1)
-    return list(reversed(days))
-
-def fetch_10day_trust():
-    """抓過去10個交易日的投信上市+上櫃買賣超"""
-    trading_days = get_past_trading_days(10)
+def scrape_trust_table(url):
+    """
+    抓嘉實資訊盤後頁面的明細表格
+    回傳 list of (date_str, trust_val) 按日期舊→新排列
+    """
+    driver = make_driver()
     results = []
-    for d in trading_days:
-        date_str = d.strftime("%Y%m%d")
-        label = d.strftime("%m/%d")
-        twse = fetch_twse_trust(date_str)
-        tpex = fetch_tpex_trust(date_str)
-        if twse is not None and tpex is not None:
-            results.append((label, twse + tpex))
-        elif twse is not None:
-            results.append((label, twse))
-        elif tpex is not None:
-            results.append((label, tpex))
-        else:
-            results.append((label, None))
-    return results
+    try:
+        driver.get(url)
+        # 等表格出現
+        wait = WebDriverWait(driver, 20)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table tbody tr")))
+        time.sleep(3)  # 等 JS 完全渲染
+
+        rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+        for row in rows:
+            cells = row.find_elements(By.TAG_NAME, "td")
+            if len(cells) < 3:
+                continue
+            date_text = cells[0].text.strip()
+            trust_text = cells[2].text.strip()  # 投信欄位
+
+            # 過濾年份行（只有年份沒有月份）
+            if not date_text or "/" not in date_text:
+                continue
+            # 清理數字
+            try:
+                trust_val = float(trust_text.replace(",", ""))
+                results.append((date_text, trust_val))
+            except:
+                continue
+    except Exception as e:
+        print(f"Selenium error: {e}")
+    finally:
+        driver.quit()
+
+    return list(reversed(results))  # 舊→新
 
 # ── 畫圖 ───────────────────────────────────────────────────
 
-def draw_trust_chart(data):
-    """畫10天投信買賣超長條圖，回傳 bytes"""
-    valid = [(d, v) for d, v in data if v is not None]
-    if not valid:
+def draw_chart(data_listed, data_otc):
+    """
+    合併上市+上櫃，畫近10日長條圖
+    data 格式: [(date_str, value), ...]
+    """
+    # 合併：找共同日期
+    otc_dict = dict(data_otc)
+    combined = []
+    for date, listed_val in data_listed:
+        otc_val = otc_dict.get(date, 0)
+        combined.append((date, listed_val + otc_val))
+
+    # 取最近10筆
+    combined = combined[-10:]
+    if not combined:
         return None
 
-    labels = [d[0] for d in valid]
-    values = [d[1] for d in valid]
+    labels = [d[0] for d in combined]
+    values = [d[1] for d in combined]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0d1b2a")
@@ -100,7 +103,7 @@ def draw_trust_chart(data):
     for bar, val in zip(bars, values):
         y = bar.get_height()
         va = "bottom" if val >= 0 else "top"
-        offset = max(abs(val) * 0.02, 0.3)
+        offset = max(abs(val) * 0.02, 0.5)
         offset = offset if val >= 0 else -offset
         ax.text(
             bar.get_x() + bar.get_width() / 2,
@@ -111,9 +114,9 @@ def draw_trust_chart(data):
         )
 
     ax.axhline(0, color="#475569", linewidth=1, zorder=2)
-    ax.set_title("投信買賣超（上市＋上櫃）近10日（億元）",
-                 color="white", fontsize=14, fontweight="bold", pad=12)
-    ax.set_ylabel("億元", color="#94a3b8", fontsize=10)
+    ax.set_title("Trust Fund Net Buy/Sell (Listed+OTC) - Past 10 Days (100M TWD)",
+                 color="white", fontsize=11, fontweight="bold", pad=12)
+    ax.set_ylabel("100M TWD", color="#94a3b8", fontsize=10)
     ax.tick_params(colors="white", labelsize=9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -121,8 +124,8 @@ def draw_trust_chart(data):
     ax.spines["bottom"].set_color("#1e293b")
     ax.grid(axis="y", color="#1e293b", linewidth=0.8, zorder=1)
 
-    buy_patch = mpatches.Patch(color="#ef4444", label="買超（紅）")
-    sell_patch = mpatches.Patch(color="#22c55e", label="賣超（綠）")
+    buy_patch = mpatches.Patch(color="#ef4444", label="Net Buy")
+    sell_patch = mpatches.Patch(color="#22c55e", label="Net Sell")
     ax.legend(handles=[buy_patch, sell_patch], facecolor="#0d1b2a",
               labelcolor="white", fontsize=9, loc="upper left")
 
@@ -156,41 +159,47 @@ def send_telegram_photo(buf, caption=""):
 
 def main():
     date_str = datetime.now().strftime("%Y/%m/%d")
-    today_str = datetime.now().strftime("%Y%m%d")
+    print(f"Scraping listed market...")
+    data_listed = scrape_trust_table(URL_LISTED)
+    print(f"Got {len(data_listed)} rows from listed")
 
-    print("Fetching today's trust fund data...")
-    twse_today = fetch_twse_trust(today_str)
-    tpex_today = fetch_tpex_trust(today_str)
+    print(f"Scraping OTC market...")
+    data_otc = scrape_trust_table(URL_OTC)
+    print(f"Got {len(data_otc)} rows from OTC")
 
-    if twse_today is not None and tpex_today is not None:
-        total = twse_today + tpex_today
+    # 今日數字
+    today_listed = data_listed[-1][1] if data_listed else None
+    today_otc = data_otc[-1][1] if data_otc else None
+
+    if today_listed is not None and today_otc is not None:
+        total = today_listed + today_otc
         direction = "買超 🔴" if total >= 0 else "賣超 🟢"
         msg = (
             f"📈 *投信買賣超（上市＋上櫃）*\n"
             f"🗓 {date_str}\n\n"
-            f"上市：`{twse_today:+.2f}` 億元\n"
-            f"上櫃：`{tpex_today:+.2f}` 億元\n"
+            f"上市：`{today_listed:+.2f}` 億元\n"
+            f"上櫃：`{today_otc:+.2f}` 億元\n"
             f"合計：`{total:+.2f}` 億元　{direction}"
         )
-    elif twse_today is not None:
+    elif today_listed is not None:
         msg = (
-            f"📈 *投信買賣超（僅上市）*\n"
+            f"📈 *投信買賣超*\n"
             f"🗓 {date_str}\n\n"
-            f"上市：`{twse_today:+.2f}` 億元\n"
-            f"⚠️ 上櫃資料暫無"
+            f"上市：`{today_listed:+.2f}` 億元\n"
+            f"⚠️ 上櫃資料抓取失敗"
         )
     else:
-        msg = f"📈 *投信買賣超*\n🗓 {date_str}\n\n❌ 資料尚未更新，請稍後再查"
+        msg = f"📈 *投信買賣超*\n🗓 {date_str}\n\n❌ 資料抓取失敗"
 
     send_telegram(msg)
 
-    print("Fetching 10-day trust data...")
-    chart_data = fetch_10day_trust()
-    chart_buf = draw_trust_chart(chart_data)
+    # 畫圖
+    chart_buf = draw_chart(data_listed, data_otc)
     if chart_buf:
-        send_telegram_photo(chart_buf, caption="投信買賣超近10日（上市＋上櫃，億元）")
+        send_telegram_photo(chart_buf,
+            caption=f"Trust Fund Net Buy/Sell (Listed+OTC) - Past 10 Days (100M TWD) - {date_str}")
     else:
-        send_telegram("⚠️ 圖表無法生成（資料不足）")
+        send_telegram("⚠️ Chart unavailable")
 
     print("Done.")
 
