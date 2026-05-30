@@ -34,11 +34,11 @@ TPEX_WEIGHT_URL = "https://www.taifex.com.tw/cht/2/tPEXPropertion"
 TWSE_TOP_N = 200
 TPEX_TOP_N = 100
 
-# investing.com 美股財報行事曆 AJAX 端點
-US_EARNINGS_URL = "https://www.investing.com/earnings-calendar/Service/getCalendarFilteredData"
+# Nasdaq 官方財報行事曆 API（逐日查詢，免金鑰）
+US_EARNINGS_URL = "https://api.nasdaq.com/api/calendar/earnings"
 US_TIMING_MAP = {
-    "Before market open": "盤前",
-    "After market close": "盤後",
+    "time-pre-market": "盤前",
+    "time-after-hours": "盤後",
 }
 
 # 事件類型顯示順序
@@ -171,72 +171,50 @@ def load_watchlist():
 
 
 def fetch_us_earnings(today, cutoff, watchlist):
-    """打 investing.com 端點取未來七天美股財報，只保留自選清單內的股票。"""
+    """逐日打 Nasdaq API 取未來七天美股財報，只保留自選清單內的股票。"""
     events = []
     if not watchlist:
         return events
     headers = {
         **HEADERS,
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "*/*",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/",
     }
-    data = {
-        "country[]": "5",
-        "dateFrom": today.strftime("%Y-%m-%d"),
-        "dateTo": cutoff.strftime("%Y-%m-%d"),
-        "currentTab": "custom",
-        "limit_from": "0",
-    }
-    try:
-        r = requests.post(US_EARNINGS_URL, headers=headers, data=data, timeout=30)
-        r.raise_for_status()
-        html = r.json()["data"]
-        soup = BeautifulSoup(html, "html.parser")
 
-        cur_date = None
-        total = 0
-        for row in soup.find_all("tr"):
-            day = row.find("td", class_="theDay")
-            if day:
-                try:
-                    cur_date = datetime.strptime(day.get_text(strip=True), "%A, %B %d, %Y").date()
-                except ValueError:
-                    cur_date = None
-                continue
+    total = 0
+    day = today
+    while day <= cutoff:
+        try:
+            r = requests.get(
+                US_EARNINGS_URL,
+                params={"date": day.strftime("%Y-%m-%d")},
+                headers=headers,
+                timeout=30,
+            )
+            r.raise_for_status()
+            rows = (r.json().get("data") or {}).get("rows") or []
+            total += len(rows)
+            for row in rows:
+                ticker = (row.get("symbol") or "").strip().upper()
+                if ticker not in watchlist:
+                    continue
+                name, order = watchlist[ticker]
+                timing = US_TIMING_MAP.get((row.get("time") or "").strip(), "")
+                events.append({
+                    "date": day,
+                    "code": ticker,
+                    "name": name,
+                    "event_type": "美股財報",
+                    "rank": order,
+                    "timing": timing,
+                })
+        except Exception as e:
+            print(f"US earnings fetch error ({day}): {e}")
+        day += timedelta(days=1)
 
-            comp = row.find("td", class_="earnCalCompany")
-            if not comp or cur_date is None:
-                continue
-            total += 1
-
-            a = comp.find("a")
-            ticker = a.get_text(strip=True).upper() if a else ""
-            if ticker not in watchlist:
-                continue
-            if not (today <= cur_date <= cutoff):
-                continue
-
-            name, order = watchlist[ticker]
-            timing = ""
-            t = row.find("td", class_="time")
-            if t:
-                sp = t.find("span")
-                if sp and sp.has_attr("data-tooltip"):
-                    timing = US_TIMING_MAP.get(sp["data-tooltip"].strip(), "")
-
-            events.append({
-                "date": cur_date,
-                "code": ticker,
-                "name": name,
-                "event_type": "美股財報",
-                "rank": order,
-                "timing": timing,
-            })
-
-        print(f"US earnings: {total} total rows, {len(events)} in watchlist")
-    except Exception as e:
-        print(f"US earnings fetch error: {e}")
+    print(f"US earnings: {total} total rows, {len(events)} in watchlist")
     return events
 
 
