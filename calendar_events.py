@@ -36,76 +36,77 @@ def make_driver():
     return webdriver.Chrome(service=service, options=opts)
 
 
-# ── Top-300 market cap via TWSE open API ───────────────────────────────────────
+# ── Top-300 market cap (上市 + 上櫃) ──────────────────────────────────────────
+
+def _fetch_twse_caps():
+    """Return list of (market_cap, code) for TWSE listed companies."""
+    url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+    r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    data = r.json()
+    pairs = []
+    for item in data:
+        code = item.get("公司代號", "").strip()
+        cap_str = item.get("市值(百萬元)", "0")
+        if not re.match(r"^\d{4,6}$", code):
+            continue
+        try:
+            pairs.append((float(str(cap_str).replace(",", "")), code))
+        except ValueError:
+            pass
+    print(f"TWSE: {len(pairs)} listed companies")
+    return pairs
+
+
+def _fetch_tpex_caps():
+    """Return list of (market_cap, code) for TPEX OTC companies."""
+    url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
+    r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    data = r.json()
+    pairs = []
+    for item in data:
+        code = item.get("SecuritiesCompanyCode", item.get("股票代號", "")).strip()
+        # Market cap = close price × issued shares (千股) / 1000 → 百萬元
+        close_str = item.get("Close", item.get("收盤價", "0"))
+        shares_str = item.get("IssuedShares", item.get("發行股數", "0"))
+        if not re.match(r"^\d{4,6}$", code):
+            continue
+        try:
+            close = float(str(close_str).replace(",", ""))
+            shares = float(str(shares_str).replace(",", ""))
+            cap = close * shares / 1_000_000  # → 百萬元
+            pairs.append((cap, code))
+        except ValueError:
+            pass
+    print(f"TPEX: {len(pairs)} OTC companies")
+    return pairs
+
 
 def fetch_top300_stocks():
     """
-    Fetch top-300 stocks by market cap using TWSE open data API.
-    Falls back to TPEX (OTC) to supplement the list.
-    Returns a set of stock codes (strings).
+    Combine TWSE (上市) and TPEX (上櫃) market caps, return top-300 codes.
     """
-    codes = set()
+    all_pairs = []
 
-    # TWSE listed companies market value
     try:
-        url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
-        data = r.json()
-        # Each item has Code, TradeVolume, etc. No direct market cap here.
-        # Use TWSE market cap endpoint instead
-    except Exception:
-        pass
-
-    # TWSE market cap ranking — use the listed company summary API
-    try:
-        url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
-        r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
-        data = r.json()
-        # Fields include: 公司代號, 公司名稱, 市值(百萬元)
-        pairs = []
-        for item in data:
-            code = item.get("公司代號", "").strip()
-            cap_str = item.get("市值(百萬元)", item.get("market_cap", "0"))
-            if not code or not re.match(r"^\d{4,6}$", code):
-                continue
-            try:
-                cap = float(str(cap_str).replace(",", ""))
-            except ValueError:
-                cap = 0
-            pairs.append((cap, code))
-        pairs.sort(reverse=True)
-        codes.update(code for _, code in pairs[:300])
-        print(f"TWSE API: {len(pairs)} companies, top-300 selected ({len(codes)} codes)")
+        all_pairs.extend(_fetch_twse_caps())
     except Exception as e:
-        print(f"TWSE market cap API error: {e}")
+        print(f"TWSE market cap error: {e}")
 
-    # If TWSE API failed or returned too few, fall back to a simple TWSE listed list
-    if len(codes) < 100:
-        try:
-            url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
-            r = requests.get(url, timeout=30)
-            # Try alternate field names
-            data = r.json()
-            print(f"TWSE fallback sample keys: {list(data[0].keys()) if data else 'empty'}")
-        except Exception as e:
-            print(f"TWSE fallback error: {e}")
+    try:
+        all_pairs.extend(_fetch_tpex_caps())
+    except Exception as e:
+        print(f"TPEX market cap error: {e}")
 
-    # Last resort: TWSE listed company basic list (no market cap sorting,
-    # but at least we know they're listed — use all listed codes as the "filter")
-    if len(codes) < 50:
-        try:
-            url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
-            r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
-            data = r.json()
-            for item in data:
-                code = item.get("Code", item.get("股票代號", "")).strip()
-                if re.match(r"^\d{4,6}$", code):
-                    codes.add(code)
-            print(f"TWSE last-resort: got {len(codes)} codes (no market cap filter)")
-        except Exception as e:
-            print(f"TWSE last-resort error: {e}")
+    if not all_pairs:
+        print("Warning: both market cap sources failed — no filter applied")
+        return set()
 
-    return codes
+    all_pairs.sort(reverse=True)
+    top300 = {code for _, code in all_pairs[:300]}
+    print(f"Top-300 combined: {len(top300)} codes  (top5: {[c for _,c in all_pairs[:5]]})")
+    return top300
 
 
 # ── Yahoo Finance TW Calendar ──────────────────────────────────────────────────
