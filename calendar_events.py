@@ -41,8 +41,12 @@ US_TIMING_MAP = {
     "time-after-hours": "盤後",
 }
 
+# 雲達期貨交易行事曆 API（台指期結算日）
+YUANTA_CAL_URL = "https://www.yuantafutures.com.tw/api/TradeCal01"
+TX_ROW_PREFIX = "大台指期貨(TX)"
+
 # 事件類型顯示順序
-EVENT_TYPE_ORDER = ["法說會", "股東會", "美股財報"]
+EVENT_TYPE_ORDER = ["流動性事件", "法說會", "股東會", "美股財報"]
 
 
 # ── 市值排名 (上市200 + 上櫃100) ───────────────────────────────────────────────
@@ -218,6 +222,50 @@ def fetch_us_earnings(today, cutoff, watchlist):
     return events
 
 
+# ── 流動性事件 (台指期結算) ─────────────────────────────────────────────────────
+
+def fetch_tx_settlements(today, cutoff):
+    """打雲達期貨行事曆 API，取台指期(TX)每月結算日（已含假日順延）。"""
+    events = []
+    headers = {**HEADERS, "Referer": "https://www.yuantafutures.com.tw/marketinfo_05"}
+    for year in sorted({today.year, cutoff.year}):
+        try:
+            r = requests.get(
+                YUANTA_CAL_URL,
+                params={"format": "json", "select01": "", "select02": "", "y": str(year), "o": ""},
+                headers=headers,
+                timeout=30,
+            )
+            r.raise_for_status()
+            rows = r.json().get("result02") or []
+            tx = next((row for row in rows
+                       if (row.get("name") or "").startswith(TX_ROW_PREFIX)), None)
+            if not tx:
+                print(f"TX row not found for {year}")
+                continue
+            for ltd in (tx.get("ltd") or []):
+                m = re.match(r"(\d{2})/(\d{2})", ltd or "")
+                if not m:
+                    continue
+                try:
+                    d = datetime(year, int(m.group(1)), int(m.group(2))).date()
+                except ValueError:
+                    continue
+                if today <= d <= cutoff:
+                    events.append({
+                        "date": d,
+                        "code": "TX",
+                        "name": "台指期結算",
+                        "event_type": "流動性事件",
+                        "rank": 0,
+                        "timing": "",
+                    })
+        except Exception as e:
+            print(f"TX settlement fetch error ({year}): {e}")
+    print(f"TX settlements in window: {len(events)}")
+    return events
+
+
 # ── 訊息格式 & 發送 ─────────────────────────────────────────────────────────────
 
 def _esc(text):
@@ -291,6 +339,10 @@ def main():
     watchlist = load_watchlist()
     us_events = fetch_us_earnings(today, cutoff, watchlist)
     filtered += us_events
+
+    print("Fetching TX futures settlement (流動性事件)...")
+    tx_events = fetch_tx_settlements(today, cutoff)
+    filtered += tx_events
 
     events_by_date: dict = {}
     for ev in filtered:
