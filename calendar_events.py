@@ -58,7 +58,7 @@ ETF_REBALANCE = [
 ETF_WINDOW_BEFORE = 2  # 生效日前 N 個交易日（卡位）
 ETF_WINDOW_AFTER = 5   # 生效日後 N 個交易日（執行換股）
 
-# 每年 1/1 推播帶一次：提醒人工複查 ETF 換股規則有沒有被基金/指數公司改掉
+# 每年 1/1–1/3 推播帶上：提醒人工複查 ETF 換股規則有沒有被基金/指數公司改掉
 ETF_REVIEW_REMINDER = (
     "⚠️ <b>年度規則複查</b>\n"
     "請對照官網確認四檔 ETF 換股規則是否仍為：\n"
@@ -439,7 +439,7 @@ def main():
         events_by_date.setdefault(ev["date"], []).append(ev)
 
     msg = format_message(events_by_date)
-    if today.month == 1 and today.day == 1:
+    if today.month == 1 and today.day <= 3:
         msg = msg + "\n\n" + ETF_REVIEW_REMINDER
     print(msg)
     send_telegram(msg)
