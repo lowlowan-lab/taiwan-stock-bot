@@ -39,9 +39,9 @@ def _scrape_taifex_weights(url, top_n, label):
     """
     Parse a TAIFEX index-weight page. Each table row holds two side-by-side
     entries: [rank, code, name, weight%, rank, code, name, weight%].
-    Extract all (code, weight) pairs, sort by weight desc, return top-N codes.
+    Returns top-N codes ordered by weight desc (biggest market cap first).
     """
-    codes = set()
+    ordered = []
     try:
         r = requests.get(url, headers=HEADERS, timeout=30)
         r.raise_for_status()
@@ -60,21 +60,28 @@ def _scrape_taifex_weights(url, top_n, label):
                 pairs.append((weight, code))
 
         pairs.sort(key=lambda x: x[0], reverse=True)
-        codes = {code for _, code in pairs[:top_n]}
-        top5 = [c for _, c in pairs[:5]]
-        print(f"{label}: {len(pairs)} stocks ranked, top-{top_n} selected, top5={top5}")
+        ordered = [code for _, code in pairs[:top_n]]
+        print(f"{label}: {len(pairs)} stocks ranked, top-{top_n} selected, top5={ordered[:5]}")
     except Exception as e:
         print(f"{label} weight fetch error: {e}")
-    return codes
+    return ordered
 
 
 def fetch_top_stocks():
-    """上市市值前200 + 上櫃市值前100。"""
-    codes = set()
-    codes |= _scrape_taifex_weights(TWSE_WEIGHT_URL, TWSE_TOP_N, "TWSE")
-    codes |= _scrape_taifex_weights(TPEX_WEIGHT_URL, TPEX_TOP_N, "TPEX")
-    print(f"Filter set total: {len(codes)} codes")
-    return codes
+    """
+    上市市值前200 + 上櫃市值前100。
+    Returns {code: rank} where smaller rank = bigger market cap.
+    TWSE stocks rank 1..200, TPEX stocks rank 201.. (TWSE caps generally larger).
+    """
+    rank_map = {}
+    twse = _scrape_taifex_weights(TWSE_WEIGHT_URL, TWSE_TOP_N, "TWSE")
+    tpex = _scrape_taifex_weights(TPEX_WEIGHT_URL, TPEX_TOP_N, "TPEX")
+    for i, code in enumerate(twse):
+        rank_map.setdefault(code, i)
+    for i, code in enumerate(tpex):
+        rank_map.setdefault(code, TWSE_TOP_N + i)
+    print(f"Filter set total: {len(rank_map)} codes")
+    return rank_map
 
 
 # ── 行事曆事件 (法說會 / 股東會) ────────────────────────────────────────────────
@@ -135,17 +142,10 @@ def _esc(text):
 
 
 def format_message(events_by_date):
-    today = datetime.now().date()
-    date_str = today.strftime("%Y/%m/%d")
-
-    lines = [
-        "<b>台股行事曆 — 法說會 / 股東會</b>",
-        f"（未來 7 天，市值前 300）  {date_str}",
-        "",
-    ]
+    lines = ["📅 <b>股市行事曆</b>", ""]
 
     if not events_by_date:
-        lines.append("未來 7 天內無符合條件的法說會或股東會。")
+        lines.append("近期無相關行事曆事件。")
         return "\n".join(lines)
 
     for date in sorted(events_by_date):
@@ -158,9 +158,10 @@ def format_message(events_by_date):
 
         for etype in sorted(by_type):
             lines.append(f"  ▎{etype}")
-            for ev in sorted(by_type[etype], key=lambda x: x["code"]):
-                name = f" {_esc(ev['name'])}" if ev["name"] else ""
-                lines.append(f"  <code>{ev['code']}</code>{name}")
+            # 依市值排序（rank 越小市值越大）
+            for ev in sorted(by_type[etype], key=lambda x: x.get("rank", 1e9)):
+                name = _esc(ev["name"]) if ev["name"] else ev["code"]
+                lines.append(f"  {name} (<code>{ev['code']}</code>)")
 
         lines.append("")
 
@@ -184,12 +185,17 @@ def main():
     cutoff = today + timedelta(days=7)
 
     print("Fetching market cap ranking (上市200 + 上櫃100)...")
-    top_stocks = fetch_top_stocks()
+    rank_map = fetch_top_stocks()
 
     print("Fetching calendar events...")
     events = fetch_calendar_events(today, cutoff)
 
-    filtered = [ev for ev in events if not top_stocks or ev["code"] in top_stocks]
+    filtered = []
+    for ev in events:
+        if rank_map and ev["code"] not in rank_map:
+            continue
+        ev["rank"] = rank_map.get(ev["code"], 1e9)
+        filtered.append(ev)
     print(f"Final filtered events: {len(filtered)}")
 
     events_by_date: dict = {}
