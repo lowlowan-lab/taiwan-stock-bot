@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
@@ -14,12 +15,14 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
+TARGET_EVENT_TYPES = {"法說會", "股東會"}
 WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
 
-CALENDAR_URLS = {
-    "法說會": "https://tw.stock.yahoo.com/calendar/earnings-call",
-    "股東會": "https://tw.stock.yahoo.com/calendar/holders-meeting",
-}
+CALENDAR_URL = "https://m.esunsec.com.tw/iframePage/calendar.aspx"
+TWSE_WEIGHT_URL = "https://www.taifex.com.tw/cht/9/futuresQADetail"
+TPEX_WEIGHT_URL = "https://www.taifex.com.tw/cht/2/tPEXPropertion"
+TWSE_TOP_N = 200
+TPEX_TOP_N = 100
 
 
 # ── Selenium driver ────────────────────────────────────────────────────────────
@@ -39,155 +42,161 @@ def make_driver():
     return webdriver.Chrome(service=service, options=opts)
 
 
-# ── Top-300 market cap (上市 + 上櫃) ──────────────────────────────────────────
+# ── Market cap ranking via TAIFEX index weight pages ───────────────────────────
 
-def _fetch_caps(url, label):
-    """Fetch market cap pairs from a TWSE open API endpoint."""
-    r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
-    r.raise_for_status()
-    data = r.json()
-    pairs = []
-    for item in data:
-        code = item.get("公司代號", "").strip()
-        cap_str = item.get("市值(百萬元)", "0")
-        if not re.match(r"^\d{4,6}$", code):
-            continue
-        try:
-            pairs.append((float(str(cap_str).replace(",", "")), code))
-        except ValueError:
-            pass
-    print(f"{label}: {len(pairs)} companies")
-    return pairs
-
-
-def fetch_top300_stocks():
-    """Combine TWSE (上市) and TPEX (上櫃) market caps, return top-300 codes."""
-    all_pairs = []
-
-    try:
-        all_pairs.extend(_fetch_caps(
-            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "TWSE"
-        ))
-    except Exception as e:
-        print(f"TWSE market cap error: {e}")
-
-    try:
-        all_pairs.extend(_fetch_caps(
-            "https://openapi.twse.com.tw/v1/opendata/t187ap03_O", "TPEX"
-        ))
-    except Exception as e:
-        print(f"TPEX market cap error: {e}")
-
-    if not all_pairs:
-        print("Warning: both market cap sources failed — no filter applied")
-        return set()
-
-    all_pairs.sort(reverse=True)
-    top300 = {code for _, code in all_pairs[:300]}
-    top5 = [code for _, code in all_pairs[:5]]
-    print(f"Top-300 combined ({len(all_pairs)} total), top5: {top5}")
-    return top300
-
-
-# ── Calendar scraping ──────────────────────────────────────────────────────────
-
-def scrape_one_calendar(url, event_type, today, cutoff):
+def _scrape_taifex_weights(url, top_n, label):
     """
-    Scrape a dedicated Yahoo Finance TW calendar page (earnings-call or
-    holders-meeting). Each page lists only one event type.
-
-    Confirmed page structure (from debug):
-        [149] 2026/06/01 週一          ← date: YYYY/MM/DD 週X
-        [150] 除權息                    (ignored on dedicated pages)
-        [151] 中航
-        [152] 2612
-        [153] 、
-        [154] 大田
-        [155] 8924
-        [156] 、
-        ...
-
-    On earnings-call / holders-meeting pages, all listed companies
-    belong to the page's event type. We just need date + code pairs.
+    Scrape a TAIFEX index-constituent-weight page.
+    Returns set of top-N stock codes ranked by weight (proxy for market cap).
     """
+    driver = make_driver()
+    codes = set()
+    try:
+        driver.get(url)
+        time.sleep(5)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        tables = soup.find_all("table")
+        print(f"  [{label}] {len(tables)} tables found")
+
+        pairs = []  # (weight, code)
+        for row in soup.select("table tr"):
+            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            if len(cells) < 2:
+                continue
+            code = next((c for c in cells if re.fullmatch(r"\d{4}", c)), None)
+            if not code:
+                continue
+            # weight: first float-looking cell
+            weight = None
+            for c in cells:
+                if re.fullmatch(r"\d+\.\d+", c.replace(",", "")):
+                    weight = float(c.replace(",", ""))
+                    break
+            pairs.append((weight if weight is not None else 0, code))
+
+        # Debug: show first few parsed rows
+        print(f"  [{label}] parsed {len(pairs)} code rows, sample: {pairs[:5]}")
+
+        # If weights present, sort by weight desc; else keep page order
+        if any(w for w, _ in pairs):
+            pairs.sort(key=lambda x: x[0], reverse=True)
+        codes = {code for _, code in pairs[:top_n]}
+        print(f"  [{label}] top-{top_n}: {len(codes)} codes")
+
+    except Exception as e:
+        print(f"  [{label}] error: {e}")
+    finally:
+        driver.quit()
+    return codes
+
+
+def fetch_top_stocks():
+    """TWSE top-200 + TPEX top-100 by index weight."""
+    codes = set()
+    codes |= _scrape_taifex_weights(TWSE_WEIGHT_URL, TWSE_TOP_N, "TWSE")
+    codes |= _scrape_taifex_weights(TPEX_WEIGHT_URL, TPEX_TOP_N, "TPEX")
+    print(f"Total filter set: {len(codes)} codes")
+    return codes
+
+
+# ── Calendar scraping (玉山證 行事曆) ──────────────────────────────────────────
+
+def fetch_calendar_events():
+    """
+    Scrape esunsec mobile calendar for 法說會 / 股東會 in the next 7 days.
+    Structure unknown — heavy debug output for first iteration.
+    """
+    today = datetime.now().date()
+    cutoff = today + timedelta(days=6)
+
     driver = make_driver()
     events = []
     try:
-        driver.get(url)
-        try:
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located(("css selector", "li"))
-            )
-        except Exception:
-            pass
-        time.sleep(6)
-
+        driver.get(CALENDAR_URL)
+        time.sleep(7)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         lines = [l.strip() for l in soup.get_text("\n", strip=True).split("\n") if l.strip()]
 
-        current_date = None
-        for i, line in enumerate(lines):
-            # Date line: YYYY/MM/DD 週X
-            dm = re.match(r"^(\d{4})/(\d{1,2})/(\d{1,2})", line)
-            if dm:
-                try:
-                    d = datetime(int(dm.group(1)), int(dm.group(2)), int(dm.group(3))).date()
-                    current_date = d if today <= d <= cutoff else None
-                except ValueError:
-                    current_date = None
-                continue
+        # Debug: dump lines that mention target event types and their context
+        print(f"  Calendar total lines: {len(lines)}")
+        for i, l in enumerate(lines):
+            if any(t in l for t in TARGET_EVENT_TYPES):
+                print(f"  Event ctx [{i}]: {lines[max(0,i-3):i+4]}")
 
-            if current_date is None:
-                continue
+        # Debug: also dump first 60 non-trivial lines to understand layout
+        print(f"  First 60 lines: {lines[:60]}")
 
-            # Stock code: standalone 4-6 digit line
-            if re.match(r"^\d{4,6}$", line):
-                code = line
-                # Company name is the line immediately before (skip separators)
-                name = ""
-                for back in range(1, 4):
-                    prev = lines[i - back] if i - back >= 0 else ""
-                    if prev in {"、", "，", ",", ""} or re.match(r"^\d", prev):
-                        continue
-                    # Skip event-type labels and date lines
-                    if re.match(r"^\d{4}/", prev) or prev in {"法說會", "股東會", "除權息"}:
-                        continue
-                    name = prev
-                    break
-
-                events.append({
-                    "date": current_date,
-                    "code": code,
-                    "name": name,
-                    "event_type": event_type,
-                })
+        events = _parse_calendar_lines(lines, today.year, today, cutoff)
+        print(f"Raw calendar events: {len(events)}")
 
     except Exception as e:
-        print(f"Scrape error ({event_type}): {e}")
+        print(f"Calendar fetch error: {e}")
     finally:
         driver.quit()
 
-    print(f"{event_type}: {len(events)} raw events")
-    return events
-
-
-def fetch_calendar_events():
-    today = datetime.now().date()
-    cutoff = today + timedelta(days=6)
-    all_events = []
-    for event_type, url in CALENDAR_URLS.items():
-        events = scrape_one_calendar(url, event_type, today, cutoff)
-        all_events.extend(events)
-
-    # Deduplicate
     seen = set()
     unique = []
-    for e in all_events:
+    for e in events:
         key = (e["date"], e["code"], e["event_type"])
         if key not in seen:
             seen.add(key)
             unique.append(e)
     return unique
+
+
+def _parse_calendar_lines(lines, year, today, cutoff):
+    """Best-effort parser; refined after we see the real structure."""
+    events = []
+    current_date = None
+    for i, line in enumerate(lines):
+        d = _try_parse_date(line, year)
+        if d is not None:
+            current_date = d if today <= d <= cutoff else None
+            continue
+        if current_date is None:
+            continue
+        for etype in TARGET_EVENT_TYPES:
+            if etype in line:
+                cm = re.search(r"\b(\d{4,6})\b", line)
+                code = cm.group(1) if cm else None
+                if not code:
+                    # look nearby
+                    for b in range(1, 4):
+                        if i - b >= 0:
+                            m = re.search(r"\b(\d{4,6})\b", lines[i - b])
+                            if m:
+                                code = m.group(1)
+                                break
+                if code:
+                    name = re.sub(r"\b\d{4,6}\b", "", line).replace(etype, "")
+                    name = re.sub(r"\s+", " ", name).strip(" -–|、")
+                    events.append({"date": current_date, "code": code,
+                                   "name": name, "event_type": etype})
+                break
+    return events
+
+
+def _try_parse_date(line, year):
+    m = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})", line)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{1,2})/(\d{1,2})", line)
+    if m:
+        try:
+            return datetime(year, int(m.group(1)), int(m.group(2))).date()
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{1,2})月(\d{1,2})日", line)
+    if m:
+        try:
+            return datetime(year, int(m.group(1)), int(m.group(2))).date()
+        except ValueError:
+            return None
+    return None
 
 
 # ── Format & Send ──────────────────────────────────────────────────────────────
@@ -238,15 +247,15 @@ def send_telegram(text):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Fetching top-300 market cap stocks...")
-    top300 = fetch_top300_stocks()
+    print("Fetching market cap ranking (上市200 + 上櫃100)...")
+    top_stocks = fetch_top_stocks()
 
-    print("Fetching Yahoo Finance TW calendar...")
+    print("Fetching calendar events...")
     events = fetch_calendar_events()
 
     filtered = [
         ev for ev in events
-        if not top300 or ev["code"] in top300
+        if not top_stocks or ev["code"] in top_stocks
     ]
     print(f"Filtered events: {len(filtered)}")
 
