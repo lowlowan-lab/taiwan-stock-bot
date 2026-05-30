@@ -1,0 +1,48 @@
+# 美股自選清單 — 一行一檔，格式：TICKER,公司名稱
+# 增減股票直接編輯這個檔即可，不用動程式
+
+# 半導體
+AVGO,Broadcom
+QCOM,Qualcomm
+TXN,Texas Instruments
+INTC,Intel
+AMD,AMD
+MRVL,Marvell
+MPWR,Monolithic Power
+ON,ON Semiconductor
+
+# 雲端 / Hyperscaler
+NVDA,Nvidia
+MSFT,Microsoft
+AMZN,Amazon
+GOOGL,Alphabet
+META,Meta
+ORCL,Oracle
+SMCI,Super Micro
+
+# 光通訊 / AI 網路
+ANET,Arista Networks
+CIEN,Ciena
+COHR,Coherent
+LITE,Lumentum
+
+# 記憶體
+MU,Micron
+WDC,Western Digital
+STX,Seagate
+SNDK,SanDisk
+
+# AI 關鍵零件
+CRDO,Credo Technology
+ACLS,Axcelis
+ONTO,Onto Innovation
+IPGP,IPG Photonics
+AXTI,AXT Inc
+WOLF,Wolfspeed
+
+# 運動服飾
+NKE,Nike
+LULU,Lululemon
+DECK,Deckers
+SKX,Skechers
+UAA,Under Armour

@@ -4,6 +4,8 @@ import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
+WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_watchlist.txt")
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -31,6 +33,16 @@ TWSE_WEIGHT_URL = "https://www.taifex.com.tw/cht/9/futuresQADetail"
 TPEX_WEIGHT_URL = "https://www.taifex.com.tw/cht/2/tPEXPropertion"
 TWSE_TOP_N = 200
 TPEX_TOP_N = 100
+
+# investing.com 美股財報行事曆 AJAX 端點
+US_EARNINGS_URL = "https://www.investing.com/earnings-calendar/Service/getCalendarFilteredData"
+US_TIMING_MAP = {
+    "Before market open": "盤前",
+    "After market close": "盤後",
+}
+
+# 事件類型顯示順序
+EVENT_TYPE_ORDER = ["法說會", "股東會", "美股財報"]
 
 
 # ── 市值排名 (上市200 + 上櫃100) ───────────────────────────────────────────────
@@ -134,6 +146,100 @@ def fetch_calendar_events(today, cutoff):
     return events
 
 
+# ── 美股財報 (investing.com，僅自選清單) ────────────────────────────────────────
+
+def load_watchlist():
+    """讀取 us_watchlist.txt，回傳 {ticker: (name, order)}，order 用於排序。"""
+    watchlist = {}
+    try:
+        with open(WATCHLIST_FILE, encoding="utf-8") as f:
+            order = 0
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(",", 1)
+                ticker = parts[0].strip().upper()
+                name = parts[1].strip() if len(parts) > 1 else ticker
+                if ticker:
+                    watchlist[ticker] = (name, order)
+                    order += 1
+        print(f"Watchlist: {len(watchlist)} tickers loaded")
+    except Exception as e:
+        print(f"Watchlist load error: {e}")
+    return watchlist
+
+
+def fetch_us_earnings(today, cutoff, watchlist):
+    """打 investing.com 端點取未來七天美股財報，只保留自選清單內的股票。"""
+    events = []
+    if not watchlist:
+        return events
+    headers = {
+        **HEADERS,
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "*/*",
+    }
+    data = {
+        "country[]": "5",
+        "dateFrom": today.strftime("%Y-%m-%d"),
+        "dateTo": cutoff.strftime("%Y-%m-%d"),
+        "currentTab": "custom",
+        "limit_from": "0",
+    }
+    try:
+        r = requests.post(US_EARNINGS_URL, headers=headers, data=data, timeout=30)
+        r.raise_for_status()
+        html = r.json()["data"]
+        soup = BeautifulSoup(html, "html.parser")
+
+        cur_date = None
+        total = 0
+        for row in soup.find_all("tr"):
+            day = row.find("td", class_="theDay")
+            if day:
+                try:
+                    cur_date = datetime.strptime(day.get_text(strip=True), "%A, %B %d, %Y").date()
+                except ValueError:
+                    cur_date = None
+                continue
+
+            comp = row.find("td", class_="earnCalCompany")
+            if not comp or cur_date is None:
+                continue
+            total += 1
+
+            a = comp.find("a")
+            ticker = a.get_text(strip=True).upper() if a else ""
+            if ticker not in watchlist:
+                continue
+            if not (today <= cur_date <= cutoff):
+                continue
+
+            name, order = watchlist[ticker]
+            timing = ""
+            t = row.find("td", class_="time")
+            if t:
+                sp = t.find("span")
+                if sp and sp.has_attr("data-tooltip"):
+                    timing = US_TIMING_MAP.get(sp["data-tooltip"].strip(), "")
+
+            events.append({
+                "date": cur_date,
+                "code": ticker,
+                "name": name,
+                "event_type": "美股財報",
+                "rank": order,
+                "timing": timing,
+            })
+
+        print(f"US earnings: {total} total rows, {len(events)} in watchlist")
+    except Exception as e:
+        print(f"US earnings fetch error: {e}")
+    return events
+
+
 # ── 訊息格式 & 發送 ─────────────────────────────────────────────────────────────
 
 def _esc(text):
@@ -156,12 +262,17 @@ def format_message(events_by_date):
         for ev in events_by_date[date]:
             by_type.setdefault(ev["event_type"], []).append(ev)
 
-        for etype in sorted(by_type):
+        ordered_types = [t for t in EVENT_TYPE_ORDER if t in by_type]
+        ordered_types += [t for t in sorted(by_type) if t not in EVENT_TYPE_ORDER]
+
+        for etype in ordered_types:
             lines.append(f"  ▎{etype}")
-            # 依市值排序（rank 越小市值越大）
+            # 依排序值（台股市值 rank 越小越大；美股依清單順序）
             for ev in sorted(by_type[etype], key=lambda x: x.get("rank", 1e9)):
                 name = _esc(ev["name"]) if ev["name"] else ev["code"]
-                lines.append(f"  {name} (<code>{ev['code']}</code>)")
+                timing = ev.get("timing")
+                suffix = f"  <i>{timing}</i>" if timing else ""
+                lines.append(f"  {name} (<code>{ev['code']}</code>){suffix}")
 
         lines.append("")
 
@@ -196,7 +307,12 @@ def main():
             continue
         ev["rank"] = rank_map.get(ev["code"], 1e9)
         filtered.append(ev)
-    print(f"Final filtered events: {len(filtered)}")
+    print(f"Final filtered TW events: {len(filtered)}")
+
+    print("Fetching US earnings (watchlist)...")
+    watchlist = load_watchlist()
+    us_events = fetch_us_earnings(today, cutoff, watchlist)
+    filtered += us_events
 
     events_by_date: dict = {}
     for ev in filtered:
