@@ -129,12 +129,17 @@ def fetch_calendar_events(today, cutoff):
 
 # ── 訊息格式 & 發送 ─────────────────────────────────────────────────────────────
 
+def _esc(text):
+    """Escape HTML special chars for Telegram HTML parse mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def format_message(events_by_date):
     today = datetime.now().date()
     date_str = today.strftime("%Y/%m/%d")
 
     lines = [
-        "*台股行事曆 — 法說會 / 股東會*",
+        "<b>台股行事曆 — 法說會 / 股東會</b>",
         f"（未來 7 天，市值前 300）  {date_str}",
         "",
     ]
@@ -145,7 +150,7 @@ def format_message(events_by_date):
 
     for date in sorted(events_by_date):
         wd = WEEKDAYS[date.weekday()]
-        lines.append(f"*{date.strftime('%m/%d')}（週{wd}）*")
+        lines.append(f"<b>{date.strftime('%m/%d')}（週{wd}）</b>")
 
         by_type: dict = {}
         for ev in events_by_date[date]:
@@ -154,8 +159,8 @@ def format_message(events_by_date):
         for etype in sorted(by_type):
             lines.append(f"  ▎{etype}")
             for ev in sorted(by_type[etype], key=lambda x: x["code"]):
-                name = f" {ev['name']}" if ev["name"] else ""
-                lines.append(f"  `{ev['code']}`{name}")
+                name = f" {_esc(ev['name'])}" if ev["name"] else ""
+                lines.append(f"  <code>{ev['code']}</code>{name}")
 
         lines.append("")
 
@@ -167,9 +172,9 @@ def send_telegram(text):
     r = requests.post(url, json={
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
     })
-    print(f"Telegram: {r.status_code}")
+    print(f"Telegram: {r.status_code} {r.text[:200]}")
 
 
 # ── 主程式 ──────────────────────────────────────────────────────────────────────
