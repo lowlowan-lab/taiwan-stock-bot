@@ -77,117 +77,78 @@ def fetch_top300_stocks():
 
 def fetch_calendar_events():
     """
-    Load Yahoo Finance TW calendar with Selenium and parse events
-    for the next 7 days. Returns list of dicts:
-      {date, code, name, event_type}
+    Load Yahoo Finance TW calendar with Selenium.
+    Uses XPath to find elements that contain target event type text,
+    then walks the DOM to extract date, stock code, and company name.
+    Returns list of dicts: {date, code, name, event_type}
     """
     today = datetime.now().date()
     cutoff = today + timedelta(days=6)
+    year = today.year
 
     driver = make_driver()
     events = []
     try:
         driver.get("https://tw.stock.yahoo.com/calendar")
-        # Wait for some list content to appear
+
+        # Wait until at least one list item appears
         try:
-            WebDriverWait(driver, 25).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "ul li, [class*='List'] li"))
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "li, [class*='item']"))
             )
         except Exception:
             pass
-        time.sleep(5)  # allow lazy-loaded content to settle
+        time.sleep(6)
 
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        events = _parse_calendar(soup, today, cutoff)
-        print(f"Yahoo calendar: {len(events)} events parsed")
+        # --- Strategy 1: find elements whose text IS exactly a target event type,
+        #     then walk ancestors to find date and stock code in nearby text ----
+        xpath_event_labels = " or ".join(
+            f"normalize-space(text())='{t}'" for t in TARGET_EVENT_TYPES
+        )
+        label_els = driver.find_elements(By.XPATH, f"//*[{xpath_event_labels}]")
+        print(f"Found {len(label_els)} event-type label elements via XPath")
 
-        # Debug: show a snippet of the text to verify structure
-        page_lines = [l.strip() for l in soup.get_text("\n").split("\n") if l.strip()]
-        sample = [l for l in page_lines if any(t in l for t in TARGET_EVENT_TYPES)]
-        print(f"Sample event lines: {sample[:5]}")
+        for el in label_els:
+            event_type = el.text.strip()
+            if event_type not in TARGET_EVENT_TYPES:
+                continue
+
+            # Walk up to find a container that holds date + stock code
+            container_text = ""
+            node = el
+            for _ in range(6):
+                try:
+                    node = node.find_element(By.XPATH, "..")
+                    container_text = node.text.strip()
+                    # Good container: has a 4-digit stock code AND a date-like pattern
+                    if re.search(r"\b\d{4,6}\b", container_text) and re.search(r"\d{1,2}/\d{1,2}", container_text):
+                        break
+                except Exception:
+                    break
+
+            parsed = _extract_from_text(container_text, event_type, year, today, cutoff)
+            if parsed:
+                events.append(parsed)
+
+        # --- Strategy 2: if strategy 1 found nothing, scan full page text -------
+        if not events:
+            print("Strategy 1 found nothing, falling back to full-text scan")
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            page_text = soup.get_text("\n", strip=True)
+            events = _scan_text(page_text, year, today, cutoff)
+
+        print(f"Total raw events parsed: {len(events)}")
+
+        # Debug: show a few lines near event-type keywords
+        soup2 = BeautifulSoup(driver.page_source, "html.parser")
+        all_lines = [l.strip() for l in soup2.get_text("\n").split("\n") if l.strip()]
+        sample = [l for l in all_lines if any(t in l for t in TARGET_EVENT_TYPES)]
+        print(f"Sample lines with event types: {sample[:8]}")
 
     except Exception as e:
         print(f"Calendar fetch error: {e}")
     finally:
         driver.quit()
-
-    return events
-
-
-def _try_parse_date(text, year):
-    """Try to parse a MM/DD date string, return date or None."""
-    m = re.match(r"^(\d{1,2})/(\d{1,2})", text.strip())
-    if m:
-        try:
-            return datetime(year, int(m.group(1)), int(m.group(2))).date()
-        except ValueError:
-            return None
-    return None
-
-
-def _parse_calendar(soup, today, cutoff):
-    """
-    Parse Yahoo Finance TW calendar HTML.
-    The page renders date sections with event lists beneath each date.
-    We scan line-by-line through the visible text to pair dates with events.
-    """
-    events = []
-    year = today.year
-
-    page_text = soup.get_text("\n", strip=True)
-    lines = [l.strip() for l in page_text.split("\n") if l.strip()]
-
-    current_date = None
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        # Detect date header: starts with MM/DD pattern
-        parsed_date = _try_parse_date(line, year)
-        if parsed_date:
-            if today <= parsed_date <= cutoff:
-                current_date = parsed_date
-            else:
-                current_date = None
-            i += 1
-            continue
-
-        # Detect event type label as a standalone line
-        event_type_found = next((t for t in TARGET_EVENT_TYPES if t == line), None)
-        if event_type_found and current_date:
-            # The stock code and name are likely on adjacent lines
-            # Look ahead for a stock code in the next few lines
-            for j in range(i + 1, min(i + 5, len(lines))):
-                code_m = re.search(r"\b(\d{4,6})\b", lines[j])
-                if code_m:
-                    code = code_m.group(1)
-                    name = re.sub(r"\b\d{4,6}\b", "", lines[j]).strip()
-                    name = re.sub(r"\s+", " ", name).strip()
-                    events.append({
-                        "date": current_date,
-                        "code": code,
-                        "name": name,
-                        "event_type": event_type_found,
-                    })
-            i += 1
-            continue
-
-        # Detect inline format: "2330 台積電 法說會" or "台積電 2330 股東會"
-        if current_date and any(t in line for t in TARGET_EVENT_TYPES):
-            code_m = re.search(r"\b(\d{4,6})\b", line)
-            if code_m:
-                code = code_m.group(1)
-                etype = next(t for t in TARGET_EVENT_TYPES if t in line)
-                name = re.sub(r"\b\d{4,6}\b", "", line).replace(etype, "").strip()
-                name = re.sub(r"\s+", " ", name).strip(" -–|")
-                events.append({
-                    "date": current_date,
-                    "code": code,
-                    "name": name,
-                    "event_type": etype,
-                })
-
-        i += 1
 
     # Deduplicate
     seen = set()
@@ -200,14 +161,76 @@ def _parse_calendar(soup, today, cutoff):
     return unique
 
 
-# ── Format message ─────────────────────────────────────────────────────────────
+def _extract_from_text(text, event_type, year, today, cutoff):
+    """Try to extract one event dict from a container's full text."""
+    code_m = re.search(r"\b(\d{4,6})\b", text)
+    if not code_m:
+        return None
+    code = code_m.group(1)
+
+    date_m = re.search(r"(\d{1,2})/(\d{1,2})", text)
+    if not date_m:
+        return None
+    try:
+        ev_date = datetime(year, int(date_m.group(1)), int(date_m.group(2))).date()
+    except ValueError:
+        return None
+    if not (today <= ev_date <= cutoff):
+        return None
+
+    # Company name: remove code, date, event_type, leftover punctuation
+    name = text
+    name = re.sub(r"\b" + code + r"\b", "", name)
+    name = re.sub(r"\d{1,2}/\d{1,2}(\s*\([^\)]*\))?", "", name)
+    name = name.replace(event_type, "")
+    name = re.sub(r"[\s　\n]+", " ", name).strip(" -–—|,，。")
+    # Take the longest segment that looks like a company name
+    parts = [p.strip() for p in re.split(r"\s+", name) if len(p.strip()) >= 2 and not re.match(r"^[\d/()（）週]+$", p.strip())]
+    name = parts[0] if parts else ""
+
+    return {"date": ev_date, "code": code, "name": name, "event_type": event_type}
+
+
+def _scan_text(page_text, year, today, cutoff):
+    """Line-by-line scan fallback."""
+    events = []
+    lines = [l.strip() for l in page_text.split("\n") if l.strip()]
+    current_date = None
+
+    for line in lines:
+        # Date header?
+        dm = re.match(r"^(\d{1,2})/(\d{1,2})", line)
+        if dm:
+            try:
+                d = datetime(year, int(dm.group(1)), int(dm.group(2))).date()
+                current_date = d if today <= d <= cutoff else None
+            except ValueError:
+                pass
+            continue
+
+        if not current_date:
+            continue
+
+        # Line contains an event type?
+        for etype in TARGET_EVENT_TYPES:
+            if etype in line:
+                code_m = re.search(r"\b(\d{4,6})\b", line)
+                if code_m:
+                    code = code_m.group(1)
+                    name = re.sub(r"\b\d{4,6}\b", "", line).replace(etype, "")
+                    name = re.sub(r"\s+", " ", name).strip(" -")
+                    events.append({"date": current_date, "code": code, "name": name, "event_type": etype})
+    return events
+
+
+# ── Format & Send ──────────────────────────────────────────────────────────────
 
 def format_message(events_by_date):
     today = datetime.now().date()
     date_str = today.strftime("%Y/%m/%d")
 
     lines = [
-        f"*台股行事曆 — 法說會 / 股東會*",
+        "*台股行事曆 — 法說會 / 股東會*",
         f"（未來 7 天，市值前 300）  {date_str}",
         "",
     ]
@@ -236,8 +259,6 @@ def format_message(events_by_date):
     return "\n".join(lines).rstrip()
 
 
-# ── Telegram ───────────────────────────────────────────────────────────────────
-
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     r = requests.post(url, json={
@@ -259,7 +280,6 @@ def main():
     print("Fetching Yahoo Finance TW calendar...")
     events = fetch_calendar_events()
 
-    # Filter: event type + top-300 (skip filter if top300 is empty)
     filtered = [
         ev for ev in events
         if ev["event_type"] in TARGET_EVENT_TYPES
