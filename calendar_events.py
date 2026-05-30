@@ -1,7 +1,7 @@
 import os
 import re
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from bs4 import BeautifulSoup
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_watchlist.txt")
@@ -44,6 +44,19 @@ US_TIMING_MAP = {
 # 雲達期貨交易行事曆 API（台指期結算日）
 YUANTA_CAL_URL = "https://www.yuantafutures.com.tw/api/TradeCal01"
 TX_ROW_PREFIX = "大台指期貨(TX)"
+
+# ETF 成分股定期審核生效日（規則計算，非爬蟲）
+#   ftse_q：富時台灣50，3/6/9/12 月第三個週五生效
+#   ftse_h：富時高股息，6/12 月第三個週五生效
+#   msci_h：MSCI ESG高股息30，5/11 月最後一個營業日生效
+ETF_REBALANCE = [
+    {"code": "0050", "name": "元大台灣50", "kind": "ftse_q"},
+    {"code": "006208", "name": "富邦台50", "kind": "ftse_q"},
+    {"code": "0056", "name": "元大高股息", "kind": "ftse_h"},
+    {"code": "00878", "name": "國泰永續高股息", "kind": "msci_h"},
+]
+ETF_WINDOW_BEFORE = 2  # 生效日前 N 個交易日（卡位）
+ETF_WINDOW_AFTER = 5   # 生效日後 N 個交易日（執行換股）
 
 # 事件類型顯示順序
 EVENT_TYPE_ORDER = ["流動性事件", "法說會", "股東會", "美股財報"]
@@ -266,6 +279,70 @@ def fetch_tx_settlements(today, cutoff):
     return events
 
 
+# ── 流動性事件 (ETF 成分股調整) ─────────────────────────────────────────────────
+
+def _third_friday(year, month):
+    first = date(year, month, 1)
+    first_friday = 1 + (4 - first.weekday()) % 7
+    return date(year, month, first_friday + 14)
+
+
+def _last_business_day(year, month):
+    d = (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)) - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _etf_effective_dates(kind, year):
+    if kind == "ftse_q":
+        return [_third_friday(year, m) for m in (3, 6, 9, 12)]
+    if kind == "ftse_h":
+        return [_third_friday(year, m) for m in (6, 12)]
+    if kind == "msci_h":
+        return [_last_business_day(year, m) for m in (5, 11)]
+    return []
+
+
+def _trading_window(eff, before, after):
+    """生效日 + 前 before / 後 after 個交易日（跳過週六日）。"""
+    days = [eff]
+    d, cnt = eff, 0
+    while cnt < before:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            days.append(d)
+            cnt += 1
+    d, cnt = eff, 0
+    while cnt < after:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            days.append(d)
+            cnt += 1
+    return days
+
+
+def fetch_etf_rebalances(today, cutoff):
+    """規則計算四檔 ETF 成分股調整日，生效日及前後窗口落在區間內就加入。"""
+    events = []
+    years = {today.year - 1, today.year, cutoff.year}
+    for year in sorted(years):
+        for etf in ETF_REBALANCE:
+            for eff in _etf_effective_dates(etf["kind"], year):
+                for d in _trading_window(eff, ETF_WINDOW_BEFORE, ETF_WINDOW_AFTER):
+                    if today <= d <= cutoff:
+                        events.append({
+                            "date": d,
+                            "code": etf["code"],
+                            "name": f"{etf['name']}成分股調整",
+                            "event_type": "流動性事件",
+                            "rank": int(etf["code"]),
+                            "timing": "生效" if d == eff else "調整期",
+                        })
+    print(f"ETF rebalance window events: {len(events)}")
+    return events
+
+
 # ── 訊息格式 & 發送 ─────────────────────────────────────────────────────────────
 
 def _esc(text):
@@ -343,6 +420,10 @@ def main():
     print("Fetching TX futures settlement (流動性事件)...")
     tx_events = fetch_tx_settlements(today, cutoff)
     filtered += tx_events
+
+    print("Computing ETF rebalance windows (流動性事件)...")
+    etf_events = fetch_etf_rebalances(today, cutoff)
+    filtered += etf_events
 
     events_by_date: dict = {}
     for ev in filtered:
