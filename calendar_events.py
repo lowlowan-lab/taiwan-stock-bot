@@ -136,11 +136,17 @@ def fetch_calendar_events():
         page_text = soup.get_text("\n", strip=True)
         lines = [l.strip() for l in page_text.split("\n") if l.strip()]
 
-        # Debug: print lines around event type keywords
-        for i, l in enumerate(lines):
-            if any(t in l for t in TARGET_EVENT_TYPES):
-                context = lines[max(0, i-3):i+4]
-                print(f"  Event context @ line {i}: {context}")
+        # Debug: print wider context around first real event (skip nav tabs)
+        event_line_indices = [
+            i for i, l in enumerate(lines)
+            if any(t == l for t in TARGET_EVENT_TYPES)
+        ]
+        real_events = [i for i in event_line_indices if i > 150]
+        if real_events:
+            first = real_events[0]
+            print(f"  Wide context lines {first-15}~{first+5}:")
+            for j in range(max(0, first - 15), min(len(lines), first + 6)):
+                print(f"    [{j}] {lines[j]}")
 
         events = _parse_lines(lines, today.year, today, cutoff)
         print(f"Total raw events: {len(events)}")
@@ -161,71 +167,104 @@ def fetch_calendar_events():
     return unique
 
 
+def _try_parse_date_line(line, year):
+    """
+    Parse various date formats Yahoo Finance TW might use:
+      05/30  |  5/30  |  5月30日  |  2026年5月30日  |  05/30（週五）
+    Returns a date object or None.
+    """
+    # MM/DD or M/D (with optional Chinese weekday suffix)
+    m = re.match(r"^(\d{1,2})/(\d{1,2})", line)
+    if m:
+        try:
+            return datetime(year, int(m.group(1)), int(m.group(2))).date()
+        except ValueError:
+            pass
+
+    # M月D日 or MM月DD日
+    m = re.match(r"^(\d{1,2})月(\d{1,2})日", line)
+    if m:
+        try:
+            return datetime(year, int(m.group(1)), int(m.group(2))).date()
+        except ValueError:
+            pass
+
+    # YYYY年M月D日
+    m = re.match(r"^\d{4}年(\d{1,2})月(\d{1,2})日", line)
+    if m:
+        try:
+            return datetime(year, int(m.group(1)), int(m.group(2))).date()
+        except ValueError:
+            pass
+
+    return None
+
+
 def _parse_lines(lines, year, today, cutoff):
     """
-    Sliding-window parser.
+    From the debug log, the confirmed page structure is:
 
-    The Yahoo Finance TW calendar page text looks like one of these patterns:
+        ...
+        [date line]   e.g. "5月30日" or "05/30"
+        ...
+        、
+        大田          ← company name (one line)
+        8924          ← stock code (one line)
+        法說會        ← event type (one line)
+        聚陽          ← next company name
+        1477          ← next stock code
+        、
+        ...
 
-    Pattern A (date → code+name → event_type):
-        06/01（週一）
-        2327 國巨
-        法說會
-
-    Pattern B (date → event_type → code → name):
-        06/01
-        法說會
-        2327
-        國巨
-
-    We track the current date as we scan. When we find an event-type line,
-    we look at the surrounding ±4 lines for a stock code.
+    Strategy: scan forward; maintain current_date.
+    When we hit an event-type line, look at the 1~2 lines immediately BEFORE it
+    for the stock code (and optionally the company name one line further back).
     """
     events = []
     current_date = None
 
     for i, line in enumerate(lines):
-        # Update current date when we see a MM/DD pattern
-        dm = re.match(r"^(\d{1,2})/(\d{1,2})", line)
-        if dm:
-            try:
-                d = datetime(year, int(dm.group(1)), int(dm.group(2))).date()
-                if today <= d <= cutoff:
-                    current_date = d
-                else:
-                    current_date = None
-            except ValueError:
-                pass
+        # Detect date line
+        d = _try_parse_date_line(line, year)
+        if d is not None:
+            current_date = d if today <= d <= cutoff else None
             continue
 
         if current_date is None:
             continue
 
-        # Check if this line is (or contains) a target event type
-        matched_type = None
-        for etype in TARGET_EVENT_TYPES:
-            if line == etype or line.startswith(etype):
-                matched_type = etype
-                break
-        if not matched_type:
+        # Detect event type as a standalone line
+        if line not in TARGET_EVENT_TYPES:
             continue
 
-        # Search ±4 lines for a stock code (4–6 digit number)
-        window_start = max(0, i - 4)
-        window_end = min(len(lines), i + 5)
-        window = lines[window_start:window_end]
+        event_type = line
 
+        # The stock code is expected on the line immediately before (i-1)
+        # and the company name one line before that (i-2).
+        # Also handle i-1 being a separator like 、 and code at i-2.
         code = None
         name = ""
-        for wline in window:
-            if wline == matched_type:
+
+        for back in range(1, 5):
+            if i - back < 0:
+                break
+            candidate = lines[i - back]
+            # Skip separators
+            if candidate in {"、", "，", ",", "／", "/", ""}:
                 continue
-            cm = re.search(r"\b(\d{4,6})\b", wline)
+            cm = re.match(r"^(\d{4,6})$", candidate)
             if cm:
                 code = cm.group(1)
-                # Name: whatever is on the same line minus the code
-                name = re.sub(r"\b\d{4,6}\b", "", wline).strip(" -–|")
-                name = re.sub(r"\s+", " ", name).strip()
+                # Name is the line before the code (skip separators)
+                for nb in range(back + 1, back + 4):
+                    if i - nb < 0:
+                        break
+                    nc = lines[i - nb]
+                    if nc in {"、", "，", ",", "／", "/", ""}:
+                        continue
+                    if not re.match(r"^\d", nc) and nc not in TARGET_EVENT_TYPES:
+                        name = nc
+                    break
                 break
 
         if code:
@@ -233,7 +272,7 @@ def _parse_lines(lines, year, today, cutoff):
                 "date": current_date,
                 "code": code,
                 "name": name,
-                "event_type": matched_type,
+                "event_type": event_type,
             })
 
     return events
