@@ -64,21 +64,37 @@ def _fetch_tpex_caps():
     r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
     r.raise_for_status()
     data = r.json()
+    if data:
+        print(f"  TPEX sample keys: {list(data[0].keys())}")
+        print(f"  TPEX sample row:  {data[0]}")
     pairs = []
     for item in data:
-        code = item.get("SecuritiesCompanyCode", item.get("股票代號", "")).strip()
-        # Market cap = close price × issued shares (千股) / 1000 → 百萬元
-        close_str = item.get("Close", item.get("收盤價", "0"))
-        shares_str = item.get("IssuedShares", item.get("發行股數", "0"))
+        # Field names vary by API version — try multiple
+        code = (item.get("SecuritiesCompanyCode")
+                or item.get("股票代號")
+                or item.get("Code", "")).strip()
+        # Market cap field (百萬元) if available directly
+        cap_str = (item.get("MarketCap")
+                   or item.get("市值")
+                   or item.get("市值(百萬元)"))
+        if cap_str is None:
+            # Compute: close × shares (千股 → 股) / 1,000,000 → 百萬元
+            close_str = (item.get("Close") or item.get("收盤價") or "0")
+            shares_str = (item.get("IssuedShares") or item.get("發行股數") or "0")
+            try:
+                close = float(str(close_str).replace(",", ""))
+                shares = float(str(shares_str).replace(",", ""))  # unit: 千股
+                cap = close * shares * 1000 / 1_000_000           # → 百萬元
+            except (ValueError, TypeError):
+                cap = 0
+        else:
+            try:
+                cap = float(str(cap_str).replace(",", ""))
+            except (ValueError, TypeError):
+                cap = 0
         if not re.match(r"^\d{4,6}$", code):
             continue
-        try:
-            close = float(str(close_str).replace(",", ""))
-            shares = float(str(shares_str).replace(",", ""))
-            cap = close * shares / 1_000_000  # → 百萬元
-            pairs.append((cap, code))
-        except ValueError:
-            pass
+        pairs.append((cap, code))
     print(f"TPEX: {len(pairs)} OTC companies")
     return pairs
 
@@ -136,17 +152,10 @@ def fetch_calendar_events():
         page_text = soup.get_text("\n", strip=True)
         lines = [l.strip() for l in page_text.split("\n") if l.strip()]
 
-        # Debug: print wider context around first real event (skip nav tabs)
-        event_line_indices = [
-            i for i, l in enumerate(lines)
-            if any(t == l for t in TARGET_EVENT_TYPES)
-        ]
-        real_events = [i for i in event_line_indices if i > 150]
-        if real_events:
-            first = real_events[0]
-            print(f"  Wide context lines {first-15}~{first+5}:")
-            for j in range(max(0, first - 15), min(len(lines), first + 6)):
-                print(f"    [{j}] {lines[j]}")
+        # Debug: print lines 80~175 to find date format and structure
+        print(f"  Page lines 80~175:")
+        for j in range(80, min(len(lines), 176)):
+            print(f"    [{j}] {lines[j]}")
 
         events = _parse_lines(lines, today.year, today, cutoff)
         print(f"Total raw events: {len(events)}")
