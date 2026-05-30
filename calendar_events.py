@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import requests
 from datetime import datetime, timedelta
@@ -27,7 +28,7 @@ TPEX_TOP_N = 100
 
 # ── Selenium driver ────────────────────────────────────────────────────────────
 
-def make_driver():
+def make_driver(capture_network=False):
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
@@ -38,8 +39,38 @@ def make_driver():
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
     )
+    if capture_network:
+        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
+
+
+def dump_network_requests(driver):
+    """Print XHR/fetch request URLs that look like data endpoints."""
+    try:
+        logs = driver.get_log("performance")
+    except Exception as e:
+        print(f"  No performance log: {e}")
+        return
+    seen = set()
+    for entry in logs:
+        try:
+            msg = json.loads(entry["message"])["message"]
+        except Exception:
+            continue
+        if msg.get("method") != "Network.requestWillBeSent":
+            continue
+        url = msg["params"]["request"]["url"]
+        if url in seen:
+            continue
+        seen.add(url)
+        # Filter to interesting data-ish endpoints
+        low = url.lower()
+        if any(k in low for k in [".ashx", ".asmx", ".json", "/api", "getcalendar",
+                                  "calendar", "data", "ajax", "handler", "service",
+                                  ".aspx/"]):
+            method = msg["params"]["request"]["method"]
+            print(f"  XHR {method}: {url[:200]}")
 
 
 # ── Market cap ranking via TAIFEX index weight pages ───────────────────────────
@@ -110,22 +141,40 @@ def fetch_calendar_events():
     today = datetime.now().date()
     cutoff = today + timedelta(days=6)
 
-    driver = make_driver()
+    driver = make_driver(capture_network=True)
     events = []
     try:
         driver.get(CALENDAR_URL)
-        time.sleep(7)
+        time.sleep(8)
+
+        # Debug 1: what data endpoints did the page hit?
+        print("  --- network requests ---")
+        dump_network_requests(driver)
+
+        # Debug 2: any iframes? print their src
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        print(f"  iframes found: {len(iframes)}")
+        for f in iframes:
+            print(f"    iframe src: {f.get_attribute('src')}")
+
+        # Debug 3: try switching into each iframe and read its text
+        for idx, f in enumerate(iframes):
+            try:
+                driver.switch_to.frame(f)
+                ftext = driver.find_element(By.TAG_NAME, "body").text
+                print(f"  iframe[{idx}] body text (first 400): {ftext[:400]!r}")
+                driver.switch_to.default_content()
+            except Exception as e:
+                print(f"  iframe[{idx}] switch error: {e}")
+                driver.switch_to.default_content()
+
         soup = BeautifulSoup(driver.page_source, "html.parser")
         lines = [l.strip() for l in soup.get_text("\n", strip=True).split("\n") if l.strip()]
 
-        # Debug: dump lines that mention target event types and their context
         print(f"  Calendar total lines: {len(lines)}")
         for i, l in enumerate(lines):
             if any(t in l for t in TARGET_EVENT_TYPES):
                 print(f"  Event ctx [{i}]: {lines[max(0,i-3):i+4]}")
-
-        # Debug: also dump first 60 non-trivial lines to understand layout
-        print(f"  First 60 lines: {lines[:60]}")
 
         events = _parse_calendar_lines(lines, today.year, today, cutoff)
         print(f"Raw calendar events: {len(events)}")
