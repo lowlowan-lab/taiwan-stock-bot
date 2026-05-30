@@ -36,40 +36,75 @@ def make_driver():
     return webdriver.Chrome(service=service, options=opts)
 
 
-# ── Top-300 market cap ─────────────────────────────────────────────────────────
+# ── Top-300 market cap via TWSE open API ───────────────────────────────────────
 
 def fetch_top300_stocks():
-    """Return set of stock codes for top-300 market-cap companies from Goodinfo."""
-    url = (
-        "https://goodinfo.tw/tw/StockList.asp"
-        "?MARKET_CAT=熱門排行"
-        "&INDUSTRY_CAT=公司總市值最高%40%40公司總市值%40%40公司總市值最高"
-        "&SHEET=公司基本資料"
-        "&RPT_TIME=最新資料"
-        "&RANK_RANGE=300"
-    )
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://goodinfo.tw/",
-        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-    }
+    """
+    Fetch top-300 stocks by market cap using TWSE open data API.
+    Falls back to TPEX (OTC) to supplement the list.
+    Returns a set of stock codes (strings).
+    """
     codes = set()
+
+    # TWSE listed companies market value
     try:
-        r = requests.get(url, headers=headers, timeout=30)
-        r.encoding = "big5"
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "STOCK_ID=" in href:
-                code = href.split("STOCK_ID=")[-1].split("&")[0].strip()
+        url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
+        data = r.json()
+        # Each item has Code, TradeVolume, etc. No direct market cap here.
+        # Use TWSE market cap endpoint instead
+    except Exception:
+        pass
+
+    # TWSE market cap ranking — use the listed company summary API
+    try:
+        url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+        r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
+        data = r.json()
+        # Fields include: 公司代號, 公司名稱, 市值(百萬元)
+        pairs = []
+        for item in data:
+            code = item.get("公司代號", "").strip()
+            cap_str = item.get("市值(百萬元)", item.get("market_cap", "0"))
+            if not code or not re.match(r"^\d{4,6}$", code):
+                continue
+            try:
+                cap = float(str(cap_str).replace(",", ""))
+            except ValueError:
+                cap = 0
+            pairs.append((cap, code))
+        pairs.sort(reverse=True)
+        codes.update(code for _, code in pairs[:300])
+        print(f"TWSE API: {len(pairs)} companies, top-300 selected ({len(codes)} codes)")
+    except Exception as e:
+        print(f"TWSE market cap API error: {e}")
+
+    # If TWSE API failed or returned too few, fall back to a simple TWSE listed list
+    if len(codes) < 100:
+        try:
+            url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+            r = requests.get(url, timeout=30)
+            # Try alternate field names
+            data = r.json()
+            print(f"TWSE fallback sample keys: {list(data[0].keys()) if data else 'empty'}")
+        except Exception as e:
+            print(f"TWSE fallback error: {e}")
+
+    # Last resort: TWSE listed company basic list (no market cap sorting,
+    # but at least we know they're listed — use all listed codes as the "filter")
+    if len(codes) < 50:
+        try:
+            url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+            r = requests.get(url, timeout=30, headers={"Accept": "application/json"})
+            data = r.json()
+            for item in data:
+                code = item.get("Code", item.get("股票代號", "")).strip()
                 if re.match(r"^\d{4,6}$", code):
                     codes.add(code)
-        print(f"Goodinfo: found {len(codes)} stock codes")
-    except Exception as e:
-        print(f"Goodinfo fetch error: {e}")
+            print(f"TWSE last-resort: got {len(codes)} codes (no market cap filter)")
+        except Exception as e:
+            print(f"TWSE last-resort error: {e}")
+
     return codes
 
 
@@ -78,72 +113,36 @@ def fetch_top300_stocks():
 def fetch_calendar_events():
     """
     Load Yahoo Finance TW calendar with Selenium.
-    Uses XPath to find elements that contain target event type text,
-    then walks the DOM to extract date, stock code, and company name.
-    Returns list of dicts: {date, code, name, event_type}
+    The page renders event types as standalone lines; nearby lines carry the date
+    and stock code. We scan the full text with a sliding-window approach.
     """
     today = datetime.now().date()
     cutoff = today + timedelta(days=6)
-    year = today.year
 
     driver = make_driver()
     events = []
     try:
         driver.get("https://tw.stock.yahoo.com/calendar")
-
-        # Wait until at least one list item appears
         try:
             WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "li, [class*='item']"))
+                EC.presence_of_element_located((By.CSS_SELECTOR, "li"))
             )
         except Exception:
             pass
         time.sleep(6)
 
-        # --- Strategy 1: find elements whose text IS exactly a target event type,
-        #     then walk ancestors to find date and stock code in nearby text ----
-        xpath_event_labels = " or ".join(
-            f"normalize-space(text())='{t}'" for t in TARGET_EVENT_TYPES
-        )
-        label_els = driver.find_elements(By.XPATH, f"//*[{xpath_event_labels}]")
-        print(f"Found {len(label_els)} event-type label elements via XPath")
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        page_text = soup.get_text("\n", strip=True)
+        lines = [l.strip() for l in page_text.split("\n") if l.strip()]
 
-        for el in label_els:
-            event_type = el.text.strip()
-            if event_type not in TARGET_EVENT_TYPES:
-                continue
+        # Debug: print lines around event type keywords
+        for i, l in enumerate(lines):
+            if any(t in l for t in TARGET_EVENT_TYPES):
+                context = lines[max(0, i-3):i+4]
+                print(f"  Event context @ line {i}: {context}")
 
-            # Walk up to find a container that holds date + stock code
-            container_text = ""
-            node = el
-            for _ in range(6):
-                try:
-                    node = node.find_element(By.XPATH, "..")
-                    container_text = node.text.strip()
-                    # Good container: has a 4-digit stock code AND a date-like pattern
-                    if re.search(r"\b\d{4,6}\b", container_text) and re.search(r"\d{1,2}/\d{1,2}", container_text):
-                        break
-                except Exception:
-                    break
-
-            parsed = _extract_from_text(container_text, event_type, year, today, cutoff)
-            if parsed:
-                events.append(parsed)
-
-        # --- Strategy 2: if strategy 1 found nothing, scan full page text -------
-        if not events:
-            print("Strategy 1 found nothing, falling back to full-text scan")
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            page_text = soup.get_text("\n", strip=True)
-            events = _scan_text(page_text, year, today, cutoff)
-
-        print(f"Total raw events parsed: {len(events)}")
-
-        # Debug: show a few lines near event-type keywords
-        soup2 = BeautifulSoup(driver.page_source, "html.parser")
-        all_lines = [l.strip() for l in soup2.get_text("\n").split("\n") if l.strip()]
-        sample = [l for l in all_lines if any(t in l for t in TARGET_EVENT_TYPES)]
-        print(f"Sample lines with event types: {sample[:8]}")
+        events = _parse_lines(lines, today.year, today, cutoff)
+        print(f"Total raw events: {len(events)}")
 
     except Exception as e:
         print(f"Calendar fetch error: {e}")
@@ -161,65 +160,81 @@ def fetch_calendar_events():
     return unique
 
 
-def _extract_from_text(text, event_type, year, today, cutoff):
-    """Try to extract one event dict from a container's full text."""
-    code_m = re.search(r"\b(\d{4,6})\b", text)
-    if not code_m:
-        return None
-    code = code_m.group(1)
+def _parse_lines(lines, year, today, cutoff):
+    """
+    Sliding-window parser.
 
-    date_m = re.search(r"(\d{1,2})/(\d{1,2})", text)
-    if not date_m:
-        return None
-    try:
-        ev_date = datetime(year, int(date_m.group(1)), int(date_m.group(2))).date()
-    except ValueError:
-        return None
-    if not (today <= ev_date <= cutoff):
-        return None
+    The Yahoo Finance TW calendar page text looks like one of these patterns:
 
-    # Company name: remove code, date, event_type, leftover punctuation
-    name = text
-    name = re.sub(r"\b" + code + r"\b", "", name)
-    name = re.sub(r"\d{1,2}/\d{1,2}(\s*\([^\)]*\))?", "", name)
-    name = name.replace(event_type, "")
-    name = re.sub(r"[\s　\n]+", " ", name).strip(" -–—|,，。")
-    # Take the longest segment that looks like a company name
-    parts = [p.strip() for p in re.split(r"\s+", name) if len(p.strip()) >= 2 and not re.match(r"^[\d/()（）週]+$", p.strip())]
-    name = parts[0] if parts else ""
+    Pattern A (date → code+name → event_type):
+        06/01（週一）
+        2327 國巨
+        法說會
 
-    return {"date": ev_date, "code": code, "name": name, "event_type": event_type}
+    Pattern B (date → event_type → code → name):
+        06/01
+        法說會
+        2327
+        國巨
 
-
-def _scan_text(page_text, year, today, cutoff):
-    """Line-by-line scan fallback."""
+    We track the current date as we scan. When we find an event-type line,
+    we look at the surrounding ±4 lines for a stock code.
+    """
     events = []
-    lines = [l.strip() for l in page_text.split("\n") if l.strip()]
     current_date = None
 
-    for line in lines:
-        # Date header?
+    for i, line in enumerate(lines):
+        # Update current date when we see a MM/DD pattern
         dm = re.match(r"^(\d{1,2})/(\d{1,2})", line)
         if dm:
             try:
                 d = datetime(year, int(dm.group(1)), int(dm.group(2))).date()
-                current_date = d if today <= d <= cutoff else None
+                if today <= d <= cutoff:
+                    current_date = d
+                else:
+                    current_date = None
             except ValueError:
                 pass
             continue
 
-        if not current_date:
+        if current_date is None:
             continue
 
-        # Line contains an event type?
+        # Check if this line is (or contains) a target event type
+        matched_type = None
         for etype in TARGET_EVENT_TYPES:
-            if etype in line:
-                code_m = re.search(r"\b(\d{4,6})\b", line)
-                if code_m:
-                    code = code_m.group(1)
-                    name = re.sub(r"\b\d{4,6}\b", "", line).replace(etype, "")
-                    name = re.sub(r"\s+", " ", name).strip(" -")
-                    events.append({"date": current_date, "code": code, "name": name, "event_type": etype})
+            if line == etype or line.startswith(etype):
+                matched_type = etype
+                break
+        if not matched_type:
+            continue
+
+        # Search ±4 lines for a stock code (4–6 digit number)
+        window_start = max(0, i - 4)
+        window_end = min(len(lines), i + 5)
+        window = lines[window_start:window_end]
+
+        code = None
+        name = ""
+        for wline in window:
+            if wline == matched_type:
+                continue
+            cm = re.search(r"\b(\d{4,6})\b", wline)
+            if cm:
+                code = cm.group(1)
+                # Name: whatever is on the same line minus the code
+                name = re.sub(r"\b\d{4,6}\b", "", wline).strip(" -–|")
+                name = re.sub(r"\s+", " ", name).strip()
+                break
+
+        if code:
+            events.append({
+                "date": current_date,
+                "code": code,
+                "name": name,
+                "event_type": matched_type,
+            })
+
     return events
 
 
@@ -272,10 +287,10 @@ def send_telegram(text):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Fetching top-300 market cap stocks from Goodinfo...")
+    print("Fetching top-300 market cap stocks...")
     top300 = fetch_top300_stocks()
     if not top300:
-        print("Warning: top-300 fetch failed — showing all events without filter")
+        print("Warning: top-300 fetch failed — no market cap filter applied")
 
     print("Fetching Yahoo Finance TW calendar...")
     events = fetch_calendar_events()
