@@ -36,10 +36,9 @@ TPEX_TOP_N = 100
 
 # Nasdaq 官方財報行事曆 API（逐日查詢，免金鑰）
 US_EARNINGS_URL = "https://api.nasdaq.com/api/calendar/earnings"
-US_TIMING_MAP = {
-    "time-pre-market": "盤前",
-    "time-after-hours": "盤後",
-}
+# Nasdaq 只給粗略時段，換算成台灣時段（不受美國日光節約影響）：
+#   美股盤前（美東早上發布）→ 台灣當天傍晚 → 台灣盤後（同日）
+#   美股盤後（美東收盤後發布）→ 台灣隔天清晨 → 台灣盤前（日期 +1）
 
 # TradingEconomics 美國經濟行事曆（impact 三星＝高影響事件）
 TE_US_CALENDAR_URL = "https://tradingeconomics.com/united-states/calendar"
@@ -224,7 +223,7 @@ def fetch_us_earnings(today, cutoff, watchlist):
     }
 
     total = 0
-    day = today
+    day = today - timedelta(days=1)  # 多抓前一天：美盤後財報換台灣時間會 +1 天進入窗口
     while day <= cutoff:
         try:
             r = requests.get(
@@ -241,9 +240,17 @@ def fetch_us_earnings(today, cutoff, watchlist):
                 if ticker not in watchlist:
                     continue
                 name, order = watchlist[ticker]
-                timing = US_TIMING_MAP.get((row.get("time") or "").strip(), "")
+                us_time = (row.get("time") or "").strip()
+                if us_time == "time-pre-market":
+                    tw_date, timing = day, "（台灣盤後）"
+                elif us_time == "time-after-hours":
+                    tw_date, timing = day + timedelta(days=1), "（台灣盤前）"
+                else:
+                    tw_date, timing = day, ""
+                if not (today <= tw_date <= cutoff):
+                    continue
                 events.append({
-                    "date": day,
+                    "date": tw_date,
                     "code": ticker,
                     "name": name,
                     "event_type": "美股",
