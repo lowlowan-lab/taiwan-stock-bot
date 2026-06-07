@@ -58,13 +58,22 @@ ETF_REBALANCE = [
 ETF_WINDOW_BEFORE = 2  # 生效日前 N 個交易日（卡位）
 ETF_WINDOW_AFTER = 5   # 生效日後 N 個交易日（執行換股）
 
+# 00919（臺灣指數公司編，無乾淨生效日公式）：鎖定已知年份，依官方/新聞公告手動補列。
+# 格式：(code, name, 公告日, 生效日, 過渡期交易日數)；過渡期自生效日起（含）往後算交易日。
+ETF_FIXED_REBALANCES = [
+    # 2026 五月審核：6/2 公布 18進18出，過渡期 8 個交易日（生效日起往後）
+    ("00919", "群益台灣精選高息", date(2026, 6, 2), date(2026, 6, 2), 8),
+    # 之後每年依公告補上（例：2026/12、2027/05 …），見年度複查提醒
+]
+
 # 每年 1/1–1/3 推播帶上：提醒人工複查 ETF 換股規則有沒有被基金/指數公司改掉
 ETF_REVIEW_REMINDER = (
     "⚠️ <b>年度規則複查</b>\n"
-    "請對照官網確認四檔 ETF 換股規則是否仍為：\n"
+    "請對照官網確認 ETF 換股規則是否仍為：\n"
     "  0050／006208：季審 3／6／9／12 月，第三個週五生效\n"
     "  0056：半年審 6／12 月，第三個週五生效\n"
-    "  00878：半年審 5／11 月，月底營業日生效（此檔最常改，重點看）"
+    "  00878：半年審 5／11 月，月底營業日生效（此檔最常改，重點看）\n"
+    "  00919：半年審 5／12 月，無公式 → 請到 ETF_FIXED_REBALANCES 補下一年度的公告日/生效日"
 )
 
 # 事件類型顯示順序
@@ -383,6 +392,43 @@ def fetch_etf_rebalances(today, cutoff):
     return events
 
 
+def _forward_trading_days(start, n):
+    """從 start（含）起算 n 個交易日（跳過週六日）。"""
+    days, d = [], start
+    while len(days) < n:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def fetch_fixed_rebalances(today, cutoff):
+    """展開手動維護的 00919 等已知換股窗口（公告日 + 生效日起 N 個交易日過渡期）。"""
+    events = []
+    for code, name, ann, eff, span in ETF_FIXED_REBALANCES:
+        full_name = f"{name}成分股調整"
+        rank = int(code)
+        window = _forward_trading_days(eff, span)
+        # 公告日（若與生效日不同天才單獨列）
+        if ann != eff and today <= ann <= cutoff:
+            events.append({
+                "date": ann, "code": code, "name": full_name,
+                "event_type": "流動性事件", "rank": rank, "timing": "公告",
+            })
+        for d in window:
+            if today <= d <= cutoff:
+                if d == eff:
+                    timing = "公告生效" if ann == eff else "生效"
+                else:
+                    timing = "調整期"
+                events.append({
+                    "date": d, "code": code, "name": full_name,
+                    "event_type": "流動性事件", "rank": rank, "timing": timing,
+                })
+    print(f"Fixed (00919) rebalance events: {len(events)}")
+    return events
+
+
 # ── 訊息格式 & 發送 ─────────────────────────────────────────────────────────────
 
 def _esc(text):
@@ -464,6 +510,10 @@ def main():
     print("Computing ETF rebalance windows (流動性事件)...")
     etf_events = fetch_etf_rebalances(today, cutoff)
     filtered += etf_events
+
+    print("Expanding fixed (00919) rebalance windows (流動性事件)...")
+    fixed_events = fetch_fixed_rebalances(today, cutoff)
+    filtered += fixed_events
 
     events_by_date: dict = {}
     for ev in filtered:
