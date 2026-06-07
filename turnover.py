@@ -1,7 +1,10 @@
+import re
 import requests
 import os
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+TW_TZ = timezone(timedelta(hours=8))  # 台灣時區（GitHub Actions 跑在 UTC，需手動 +8）
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -10,145 +13,52 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
 }
 
-def fetch_turnover_rank():
-    url = "https://tw.stock.yahoo.com/rank/turnover"
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    items = soup.select("ul.M\\(0\\) li")
-    if not items:
-        # 備用選擇器
-        items = soup.select("li.List\\(n\\)")
-
-    results = []
-    for item in items[:10]:
-        try:
-            # 股名
-            name_el = item.select_one("div.Fw\\(b\\)")
-            name = name_el.text.strip() if name_el else "—"
-
-            # 股號
-            code_el = item.select_one("span.C\\(\\$c-link-color\\)")
-            code = code_el.text.strip().replace(".TW", "").replace(".TWO", "") if code_el else "—"
-
-            # 所有數字欄位
-            spans = item.select("span.Fz\\(16px\\), li span")
-            numbers = [s.text.strip() for s in item.select("span") if s.text.strip()]
-
-            # 漲跌幅
-            change_pct_el = item.select_one("span[class*='Bgc']")
-
-            # 直接抓所有文字節點
-            texts = [t.strip() for t in item.stripped_strings]
-
-            results.append({
-                "name": name,
-                "code": code,
-                "texts": texts,
-            })
-        except Exception as e:
-            continue
-
-    return results
-
-def fetch_turnover_data():
-    """用更直接的方式解析 Yahoo 成交金額排行"""
-    url = "https://tw.stock.yahoo.com/rank/turnover"
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    results = []
-    # Yahoo Finance 的排行榜用 li 結構
-    rows = soup.find_all("li", class_=lambda c: c and "List(n)" in c)
-
-    if not rows:
-        # 嘗試找所有 li 裡有股票名稱的
-        rows = soup.find_all("li")
-
-    for row in rows[:10]:
-        text_nodes = list(row.stripped_strings)
-        if len(text_nodes) < 5:
-            continue
-
-        # 過濾掉不是股票資料的 li
-        # 股票資料通常第一個是排名數字或股名
-        try:
-            # 找漲跌幅（含 % 符號）
-            pct = next((t for t in text_nodes if "%" in t), "—")
-            # 找成交金額（含小數點，通常最後幾個）
-            amounts = [t for t in text_nodes if "." in t and t.replace(".", "").replace(",", "").isdigit()]
-            amount = amounts[-1] if amounts else "—"
-            # 名稱通常是中文
-            name = next((t for t in text_nodes if any("\u4e00" <= c <= "\u9fff" for c in t)), "—")
-            # 代碼
-            code = next((t for t in text_nodes if t.replace(".", "").replace("TW", "").replace("TWO", "").isdigit()), "—")
-            code = code.replace(".TW", "").replace(".TWO", "")
-
-            results.append({
-                "name": name,
-                "code": code,
-                "change_pct": pct,
-                "amount": amount,
-            })
-        except:
-            continue
-
-    return results
-
 def parse_turnover_page():
-    """解析成交金額排行，回傳前10筆"""
+    """解析 Yahoo 成交金額排行前10筆。
+
+    重點：Yahoo 的漲跌幅文字「不含正負號」，方向是用 CSS class
+    c-trend-up / c-trend-down 標示，所以方向一律以 class 為準。
+    """
     url = "https://tw.stock.yahoo.com/rank/turnover"
     r = requests.get(url, headers=HEADERS, timeout=30)
     soup = BeautifulSoup(r.text, "html.parser")
 
     results = []
     rank = 1
-
-    # Yahoo 用 ul > li 結構，每個 li 是一支股票
-    # 找包含股票資料的 li（至少含有中文名稱和百分比）
-    all_li = soup.find_all("li")
-
-    for li in all_li:
+    for li in soup.find_all("li", class_=lambda c: c and "List(n)" in c):
         if rank > 10:
             break
-        text_list = list(li.stripped_strings)
-        full_text = " ".join(text_list)
 
-        # 有中文 + 有 % + 有數字 = 股票資料列
-        has_chinese = any("\u4e00" <= c <= "\u9fff" for c in full_text)
-        has_pct = "%" in full_text
-
-        if not (has_chinese and has_pct):
+        # 漲跌幅 span：文字以 % 結尾；方向看它的 class
+        pct_span = next((sp for sp in li.find_all("span")
+                         if sp.get_text(strip=True).endswith("%")), None)
+        if not pct_span:
             continue
-        if len(text_list) < 6:
-            continue
+        cls = " ".join(pct_span.get("class") or [])
+        direction = 1 if "c-trend-up" in cls else -1 if "c-trend-down" in cls else 0
 
-        try:
-            # 找股名（純中文）
-            name = next((t for t in text_list if any("\u4e00" <= c <= "\u9fff" for c in t) and len(t) >= 2), "—")
-            # 找代碼（純數字4碼）
-            code = next((t for t in text_list if t.isdigit() and len(t) == 4), "—")
-            # 找漲跌幅（含%）
-            pct = next((t for t in text_list if "%" in t), "—")
-            # 找成交金額億（通常是最後一個含小數的數字）
-            decimals = [t for t in text_list if "." in t and len(t) <= 10]
-            amount = decimals[-1] if decimals else "—"
+        texts = list(li.stripped_strings)
+        name = next((t for t in texts
+                     if any("\u4e00" <= ch <= "\u9fff" for ch in t) and len(t) >= 2), "—")
+        code = "—"
+        for t in texts:
+            m = re.match(r"^(\d{4,6})\.(TWO?|TW)$", t)
+            if m:
+                code = m.group(1)
+                break
+        # 成交值（億）：最後一個含小數點的數字
+        amount = next((t for t in reversed(texts)
+                       if re.match(r"^[\d,]+\.\d+$", t)), "—")
 
-            # 判斷漲跌方向
-            is_up = "+" in pct or (pct != "—" and not pct.startswith("-") and pct != "0.00%")
-            arrow = "🔺" if is_up else "🔻" if pct.startswith("-") else "▪️"
-
-            results.append({
-                "rank": rank,
-                "name": name,
-                "code": code,
-                "change_pct": pct,
-                "amount": amount,
-                "arrow": arrow,
-            })
-            rank += 1
-        except:
-            continue
+        results.append({
+            "rank": rank,
+            "name": name,
+            "code": code,
+            "pct": pct_span.get_text(strip=True),  # 無符號，如 "0.84%"
+            "direction": direction,                # 1 漲 / -1 跌 / 0 平
+            "amount": amount,
+        })
+        rank += 1
 
     return results
 
@@ -164,14 +74,15 @@ def format_turnover_message(rows, now_str):
         rank = f"{row['rank']:2}"
         name = f"{row['name'][:6]:<7}"
 
-        # 漲跌幅：小數一位，固定寬度
-        pct_raw = row["change_pct"].replace("%", "").replace("+", "").strip()
+        # 漲跌幅：正負號一律以 direction（CSS class）為準，固定寬度
+        pct_raw = row["pct"].replace("%", "").replace("+", "").replace("-", "").strip()
+        d = row["direction"]
         try:
             pct_val = float(pct_raw)
-            sign = "+" if pct_val > 0 else ""
+            sign = "+" if d > 0 else "-" if d < 0 else ""
             pct_str = f"{sign}{pct_val:.1f}%"
         except:
-            pct_str = row["change_pct"]
+            pct_str = row["pct"]
         pct_display = f"{pct_str:>7}"
 
         # 成交金額：取整數
@@ -197,7 +108,7 @@ def send_telegram(text):
     print(f"Telegram: {r.status_code} {r.text[:100]}")
 
 def main():
-    now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
+    now_str = datetime.now(TW_TZ).strftime("%Y/%m/%d %H:%M")
     print(f"Fetching turnover rank at {now_str}...")
 
     rows = parse_turnover_page()

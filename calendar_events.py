@@ -242,9 +242,9 @@ def fetch_us_earnings(today, cutoff, watchlist):
                 name, order = watchlist[ticker]
                 us_time = (row.get("time") or "").strip()
                 if us_time == "time-pre-market":
-                    tw_date, timing = day, "（台灣盤後）"
+                    tw_date, timing = day, "盤後"
                 elif us_time == "time-after-hours":
-                    tw_date, timing = day + timedelta(days=1), "（台灣盤前）"
+                    tw_date, timing = day + timedelta(days=1), "盤前"
                 else:
                     tw_date, timing = day, ""
                 if not (today <= tw_date <= cutoff):
@@ -298,7 +298,7 @@ def fetch_us_econ_events(today, cutoff):
                 tw_dt = datetime.strptime(f"{datecls[0]} {timestr}", "%Y-%m-%d %I:%M %p") \
                     + timedelta(hours=8)
                 ev_date = tw_dt.date()
-                timing = "（台灣盤前）" if tw_dt.hour < 9 else "（台灣盤後）"
+                timing = "盤前" if tw_dt.hour < 9 else "盤後"
             except ValueError:
                 # 無可解析時間（如 All Day）→ 退回用頁面日期、不標盤前後
                 try:

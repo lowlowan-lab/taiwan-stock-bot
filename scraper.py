@@ -40,12 +40,13 @@ def fetch_data(url, params):
 
 def format_message(label, rows):
     lines = [f"*{label}*"]
-    lines.append("`#   代碼    名稱       買賣超(千)`")
+    lines.append("`#   代碼    名稱       買賣超(百萬)`")
     lines.append("`" + "─" * 34 + "`")
     for i, row in enumerate(rows, 1):
         code = row["V2"].replace("AS", "").replace("AP", "")
         name = row["V3"][:6]
-        amount = f"{int(row['V9']):,}"
+        # V9 原始單位為千元，轉成百萬元（÷1000）讓數字短一點
+        amount = f"{int(row['V9']) / 1000:,.0f}"
         change = float(row["V5"])
         arrow = "▲" if change > 0 else "▼" if change < 0 else "－"
         lines.append(f"`{i:2}. {code:<6} {name:<7} {arrow} {amount:>10}`")
