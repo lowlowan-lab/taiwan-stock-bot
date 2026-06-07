@@ -79,7 +79,7 @@ ETF_REVIEW_REMINDER = (
 )
 
 # 事件類型顯示順序
-EVENT_TYPE_ORDER = ["法說會", "股東會", "美股財報", "流動性事件"]
+EVENT_TYPE_ORDER = ["法說會", "股東會", "美股", "流動性事件"]
 
 
 # ── 市值排名 (上市200 + 上櫃100) ───────────────────────────────────────────────
@@ -243,7 +243,7 @@ def fetch_us_earnings(today, cutoff, watchlist):
                     "date": day,
                     "code": ticker,
                     "name": name,
-                    "event_type": "美股財報",
+                    "event_type": "美股",
                     "rank": order,
                     "timing": timing,
                 })
