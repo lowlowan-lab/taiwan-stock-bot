@@ -290,10 +290,13 @@ def fetch_tx_settlements(today, cutoff):
 
 # ── 流動性事件 (ETF 成分股調整) ─────────────────────────────────────────────────
 
-def _third_friday(year, month):
+def _first_friday(year, month):
     first = date(year, month, 1)
-    first_friday = 1 + (4 - first.weekday()) % 7
-    return date(year, month, first_friday + 14)
+    return date(year, month, 1 + (4 - first.weekday()) % 7)
+
+
+def _third_friday(year, month):
+    return _first_friday(year, month) + timedelta(days=14)
 
 
 def _last_business_day(year, month):
@@ -303,14 +306,30 @@ def _last_business_day(year, month):
     return d
 
 
+# 審核月份（公告與生效共用）
+ETF_REVIEW_MONTHS = {
+    "ftse_q": (3, 6, 9, 12),
+    "ftse_h": (6, 12),
+    "msci_h": (5, 11),
+}
+# 有「成分股審核公告日」規則的：FTSE 系列＝審核月第一個週五公告（生效前兩週）
+# 00878(MSCI) 無明確公告日規則，不產生公告事件
+ETF_ANNOUNCE_KINDS = {"ftse_q", "ftse_h"}
+
+
 def _etf_effective_dates(kind, year):
-    if kind == "ftse_q":
-        return [_third_friday(year, m) for m in (3, 6, 9, 12)]
-    if kind == "ftse_h":
-        return [_third_friday(year, m) for m in (6, 12)]
+    months = ETF_REVIEW_MONTHS.get(kind, ())
+    if kind in ("ftse_q", "ftse_h"):
+        return [_third_friday(year, m) for m in months]
     if kind == "msci_h":
-        return [_last_business_day(year, m) for m in (5, 11)]
+        return [_last_business_day(year, m) for m in months]
     return []
+
+
+def _etf_announce_dates(kind, year):
+    if kind not in ETF_ANNOUNCE_KINDS:
+        return []
+    return [_first_friday(year, m) for m in ETF_REVIEW_MONTHS.get(kind, ())]
 
 
 def _trading_window(eff, before, after):
@@ -337,6 +356,18 @@ def fetch_etf_rebalances(today, cutoff):
     years = {today.year - 1, today.year, cutoff.year}
     for year in sorted(years):
         for etf in ETF_REBALANCE:
+            # 成分股審核公告日（僅 FTSE 系列）
+            for ann in _etf_announce_dates(etf["kind"], year):
+                if today <= ann <= cutoff:
+                    events.append({
+                        "date": ann,
+                        "code": etf["code"],
+                        "name": f"{etf['name']}成分股調整",
+                        "event_type": "流動性事件",
+                        "rank": int(etf["code"]),
+                        "timing": "公告",
+                    })
+            # 生效日 + 前後過渡窗口
             for eff in _etf_effective_dates(etf["kind"], year):
                 for d in _trading_window(eff, ETF_WINDOW_BEFORE, ETF_WINDOW_AFTER):
                     if today <= d <= cutoff:
