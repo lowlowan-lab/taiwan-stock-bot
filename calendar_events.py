@@ -273,7 +273,8 @@ def fetch_us_econ_events(today, cutoff):
         total3 = 0
         for tr in tbl.find_all("tr"):
             # 重要度藏在時間 span 的 class：calendar-date-3 = 三星
-            if not tr.find("span", class_="calendar-date-3"):
+            span = tr.find("span", class_="calendar-date-3")
+            if not span:
                 continue
             total3 += 1
 
@@ -282,10 +283,22 @@ def fetch_us_econ_events(today, cutoff):
                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", c)] if td0 else []
             if not datecls:
                 continue
+
+            # TE 顯示 UTC（絕對時間，不受美國日光節約影響）→ +8 換台灣時間。
+            # 跨午夜時台灣日期自然變 T+1；盤前/盤後以台灣股市 09:00 開盤判斷。
+            timestr = span.get_text(strip=True)
             try:
-                ev_date = datetime.strptime(datecls[0], "%Y-%m-%d").date()
+                tw_dt = datetime.strptime(f"{datecls[0]} {timestr}", "%Y-%m-%d %I:%M %p") \
+                    + timedelta(hours=8)
+                ev_date = tw_dt.date()
+                timing = "（台灣盤前）" if tw_dt.hour < 9 else "（台灣盤後）"
             except ValueError:
-                continue
+                # 無可解析時間（如 All Day）→ 退回用頁面日期、不標盤前後
+                try:
+                    ev_date = datetime.strptime(datecls[0], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                timing = ""
             if not (today <= ev_date <= cutoff):
                 continue
 
@@ -300,7 +313,7 @@ def fetch_us_econ_events(today, cutoff):
                 "name": name,
                 "event_type": "美股",
                 "rank": -1,        # 經濟事件排在個股財報前面
-                "timing": "",
+                "timing": timing,
             })
 
         print(f"US econ (3-star): {total3} in page, {len(events)} in window")
