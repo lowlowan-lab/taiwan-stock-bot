@@ -41,6 +41,9 @@ US_TIMING_MAP = {
     "time-after-hours": "盤後",
 }
 
+# TradingEconomics 美國經濟行事曆（impact 三星＝高影響事件）
+TE_US_CALENDAR_URL = "https://tradingeconomics.com/united-states/calendar"
+
 # 雲達期貨交易行事曆 API（台指期結算日）
 YUANTA_CAL_URL = "https://www.yuantafutures.com.tw/api/TradeCal01"
 TX_ROW_PREFIX = "大台指期貨(TX)"
@@ -183,7 +186,7 @@ def fetch_calendar_events(today, cutoff):
     return events
 
 
-# ── 美股財報 (investing.com，僅自選清單) ────────────────────────────────────────
+# ── 美股 (Nasdaq 自選清單財報 + TradingEconomics 三星經濟事件) ──────────────────
 
 def load_watchlist():
     """讀取 us_watchlist.txt，回傳 {ticker: (name, order)}，order 用於排序。"""
@@ -252,6 +255,57 @@ def fetch_us_earnings(today, cutoff, watchlist):
         day += timedelta(days=1)
 
     print(f"US earnings: {total} total rows, {len(events)} in watchlist")
+    return events
+
+
+def fetch_us_econ_events(today, cutoff):
+    """抓 TradingEconomics 美國行事曆中 impact 三星（calendar-date-3）的高影響事件。"""
+    events = []
+    try:
+        r = requests.get(TE_US_CALENDAR_URL, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.content, "html.parser")
+        tbl = soup.find("table", id="calendar")
+        if not tbl:
+            print("TE calendar table not found")
+            return events
+
+        total3 = 0
+        for tr in tbl.find_all("tr"):
+            # 重要度藏在時間 span 的 class：calendar-date-3 = 三星
+            if not tr.find("span", class_="calendar-date-3"):
+                continue
+            total3 += 1
+
+            td0 = tr.find("td")
+            datecls = [c for c in (td0.get("class") or [])
+                       if re.fullmatch(r"\d{4}-\d{2}-\d{2}", c)] if td0 else []
+            if not datecls:
+                continue
+            try:
+                ev_date = datetime.strptime(datecls[0], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if not (today <= ev_date <= cutoff):
+                continue
+
+            a = tr.find("a", class_="calendar-event")
+            name = (a.get_text(strip=True) if a else tr.get("data-event", "")).strip()
+            if not name:
+                continue
+
+            events.append({
+                "date": ev_date,
+                "code": "",
+                "name": name,
+                "event_type": "美股",
+                "rank": -1,        # 經濟事件排在個股財報前面
+                "timing": "",
+            })
+
+        print(f"US econ (3-star): {total3} in page, {len(events)} in window")
+    except Exception as e:
+        print(f"US econ fetch error: {e}")
     return events
 
 
@@ -463,7 +517,9 @@ def format_message(events_by_date):
                 name = _esc(ev["name"]) if ev["name"] else ev["code"]
                 timing = ev.get("timing")
                 suffix = f"  <i>{timing}</i>" if timing else ""
-                lines.append(f"  {name} (<code>{ev['code']}</code>){suffix}")
+                code = ev.get("code")
+                code_part = f" (<code>{_esc(code)}</code>)" if code else ""
+                lines.append(f"  {name}{code_part}{suffix}")
 
         lines.append("")
 
@@ -504,6 +560,10 @@ def main():
     watchlist = load_watchlist()
     us_events = fetch_us_earnings(today, cutoff, watchlist)
     filtered += us_events
+
+    print("Fetching US economic events (TradingEconomics 3-star)...")
+    econ_events = fetch_us_econ_events(today, cutoff)
+    filtered += econ_events
 
     print("Fetching TX futures settlement (流動性事件)...")
     tx_events = fetch_tx_settlements(today, cutoff)
