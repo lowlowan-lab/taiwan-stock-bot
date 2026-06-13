@@ -1,10 +1,11 @@
 name: US Daily Report Push
 on:
   schedule:
-    # UTC 01:00 = 台灣 09:00（美股盤後已收盤）。
-    # 週二~週六對應美股週一~週五的交易日隔天早上。
+    # UTC 23:00 = 台灣隔天 07:00。UTC 週日~週四 = 台灣週一~週五早上。
+    # 台灣週一 07:00 recap 美股週五場（週末休市，最新一場就是週五）；
+    # 其餘各日 recap 前一個美股交易日。
     # 注意：GitHub cron 是 UTC、不會自動處理美國日光節約時間。
-    - cron: "0 1 * * 2-6"
+    - cron: "0 23 * * 0-4"
   workflow_dispatch:
 jobs:
   push:
