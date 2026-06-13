@@ -1,0 +1,23 @@
+name: US Daily Report Push
+on:
+  schedule:
+    # UTC 01:00 = 台灣 09:00（美股盤後已收盤）。
+    # 週二~週六對應美股週一~週五的交易日隔天早上。
+    # 注意：GitHub cron 是 UTC、不會自動處理美國日光節約時間。
+    - cron: "0 1 * * 2-6"
+  workflow_dispatch:
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run US daily report
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python us_daily.py

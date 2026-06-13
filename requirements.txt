@@ -3,3 +3,4 @@ matplotlib
 beautifulsoup4
 selenium
 webdriver-manager
+anthropic
