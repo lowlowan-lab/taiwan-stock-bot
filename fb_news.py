@@ -10,6 +10,7 @@ APIFY_TOKEN = os.environ["APIFY_TOKEN"]
 TW_TZ = timezone(timedelta(hours=8))          # 台灣時區（runner 在 UTC）
 KEYWORD = "外電綜合整理"                         # 只要含這關鍵字的當日貼文
 SIMILAR_THRESHOLD = 0.80                       # 內容相似度 >= 此值視為重複
+DEBUG = os.environ.get("FB_NEWS_DEBUG", "").lower() in ("1", "true", "yes")  # 測試模式
 
 # 兩個 FB 粉專
 PAGES = [
@@ -118,17 +119,45 @@ def collect_matches(items, today):
     return matches
 
 
+def debug_message(items, matches, today):
+    """測試模式：不論今天有無符合貼文，都回報整條管線的狀態。"""
+    lines = [
+        "🔧 <b>fb_news 測試</b>",
+        f"Apify 回傳貼文：{len(items)} 篇",
+        f"今日（{today}）含「{KEYWORD}」：{len(matches)} 篇",
+    ]
+    if items:
+        sample = items[0]
+        preview = (sample.get("text") or "")[:60].replace("\n", " ")
+        lines.append("")
+        lines.append(f"最近一篇 日期：{post_date_tw(sample)}")
+        lines.append(f"預覽：{_esc(preview)}…")
+    if matches:
+        lines.append("")
+        lines.append("———")
+        lines.append(format_message(dedupe(matches)))
+    return "\n".join(lines)
+
+
 def main():
     today = datetime.now(TW_TZ).date()
     try:
         items = fetch_posts()
     except Exception as e:
         print(f"Apify fetch error: {e}")
+        if DEBUG:
+            send_telegram(f"🔧 <b>fb_news 測試</b>\nApify 抓取失敗：{_esc(str(e))}")
         return
     print(f"Apify returned {len(items)} posts")
 
     matches = collect_matches(items, today)
     print(f"Matched {len(matches)} '{KEYWORD}' posts for {today}")
+
+    if DEBUG:
+        send_telegram(debug_message(items, matches, today))
+        print("Debug message sent.")
+        return
+
     if not matches:
         print("No matching posts today — staying silent.")
         return

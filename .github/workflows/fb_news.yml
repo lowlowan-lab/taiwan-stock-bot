@@ -2,6 +2,11 @@ name: Daily FB 外電綜合整理
 
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: '測試模式：不論今天有無發文，都推一則診斷訊息確認管線正常'
+        type: boolean
+        default: false
 
 jobs:
   push:
@@ -27,4 +32,5 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          FB_NEWS_DEBUG: ${{ inputs.debug }}
         run: python fb_news.py
