@@ -12,7 +12,7 @@
 資料來源：
   - 報價：Yahoo Finance v7/finance/quote（需 cookie + crumb 授權）
   - 新聞：Yahoo Finance v1/finance/search
-  - 漲跌原因摘要：Claude API（需 ANTHROPIC_API_KEY；沒設或失敗則退回顯示原始標題）
+  - 漲跌原因摘要：Google Gemini 免費 API（需 GEMINI_API_KEY；沒設或失敗則退回顯示原始標題）
 """
 import os
 import re
@@ -25,11 +25,11 @@ TW_TZ = timezone(timedelta(hours=8))  # 台灣時區（Actions 跑在 UTC，需�
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # 可選；缺則退回原始標題
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")  # 可選；缺則退回原始標題
 
 # 漲跌超過這個門檻（%）就去抓新聞當原因
 MOVE_THRESHOLD = 3.0
-CLAUDE_MODEL = "claude-opus-4-8"
+GEMINI_MODEL = "gemini-2.0-flash"  # Google AI Studio 免費額度即可
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -184,19 +184,14 @@ def build_summary(groups, quotes, date_str):
 
 
 def summarize_reasons(items):
-    """用 Claude 把每檔的新聞標題濃縮成一句中文漲跌原因。
+    """用 Google Gemini 把每檔的新聞標題濃縮成一句中文漲跌原因。
 
     items: [{"ticker", "name", "reg", "post", "headlines": [標題,...]}, ...]
     回傳 {ticker: 一句原因}，原因為空字串代表新聞與當日漲跌無明確關聯（略過不列）。
     沒設 API key 或呼叫失敗則回傳 {}（由呼叫端退回原始標題）。
     """
-    if not ANTHROPIC_API_KEY:
-        print("No ANTHROPIC_API_KEY — 退回顯示原始標題")
-        return {}
-    try:
-        import anthropic
-    except ImportError:
-        print("anthropic 套件未安裝 — 退回顯示原始標題")
+    if not GEMINI_API_KEY:
+        print("No GEMINI_API_KEY — 退回顯示原始標題")
         return {}
 
     payload = [
@@ -219,41 +214,48 @@ def summarize_reasons(items):
         "只根據提供的標題判斷，不要杜撰具體數字或不存在的事件。寧可留空，也不要硬湊。\n\n"
         f"資料：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
+    # Gemini 結構化輸出（responseSchema 用 OpenAPI 子集、型別大寫）
     schema = {
-        "type": "object",
+        "type": "OBJECT",
         "properties": {
             "reasons": {
-                "type": "array",
+                "type": "ARRAY",
                 "items": {
-                    "type": "object",
+                    "type": "OBJECT",
                     "properties": {
-                        "ticker": {"type": "string"},
-                        "reason": {"type": "string"},
+                        "ticker": {"type": "STRING"},
+                        "reason": {"type": "STRING"},
                     },
                     "required": ["ticker", "reason"],
-                    "additionalProperties": False,
                 },
             }
         },
         "required": ["reasons"],
-        "additionalProperties": False,
     }
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent")
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        resp = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=2000,
-            output_config={
-                "effort": "low",  # 單純摘要，不需深度思考
-                "format": {"type": "json_schema", "schema": schema},
+        r = requests.post(
+            url,
+            headers={"x-goog-api-key": GEMINI_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": schema,
+                    "temperature": 0,
+                },
             },
-            messages=[{"role": "user", "content": prompt}],
+            timeout=60,
         )
-        text = next(b.text for b in resp.content if b.type == "text")
+        r.raise_for_status()
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
         data = json.loads(text)
-        return {r["ticker"]: r["reason"] for r in data.get("reasons", [])}
+        return {x["ticker"]: x["reason"] for x in data.get("reasons", [])}
     except Exception as e:
-        print(f"Claude 摘要失敗，退回原始標題：{e}")
+        detail = getattr(e, "response", None)
+        msg = detail.text[:200] if detail is not None else e
+        print(f"Gemini 摘要失敗，退回原始標題：{msg}")
         return {}
 
 
