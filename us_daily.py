@@ -6,18 +6,13 @@
 盤後漲跌幅取當下值。
 
 內容：
-  1. us_watchlist.txt 內每一檔的「當日漲跌幅」「盤後漲跌幅」
-  2. 任一檔當日或盤後漲跌超過 ±3% → 抓近期新聞，交給 Claude 濃縮成一句中文原因
+  - us_watchlist.txt 內每一檔的「當日漲跌幅」「盤後漲跌幅」
+  - 當日或盤後漲跌超過 ±3% 的個股標 🔥
 
 資料來源：
   - 報價：Yahoo Finance v7/finance/quote（需 cookie + crumb 授權）
-  - 新聞：Yahoo Finance v1/finance/search
-  - 漲跌原因摘要：Google Gemini 免費 API（需 GEMINI_API_KEY；沒設或失敗則退回顯示原始標題）
 """
 import os
-import re
-import html
-import json
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -25,11 +20,9 @@ TW_TZ = timezone(timedelta(hours=8))  # 台灣時區（Actions 跑在 UTC，需�
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")  # 可選；缺則退回原始標題
 
-# 漲跌超過這個門檻（%）就去抓新聞當原因
+# 當日或盤後漲跌超過這個門檻（%）就標 🔥
 MOVE_THRESHOLD = 3.0
-GEMINI_MODEL = "gemini-2.0-flash"  # Google AI Studio 免費額度即可
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -123,34 +116,6 @@ def fetch_quote_fallback(session, ticker):
         return {"reg": None, "post": None, "price": None, "state": None, "time": None}
 
 
-# ────────────────────────────── 新聞原因 ──────────────────────────────
-def fetch_reason(session, ticker, max_items=4):
-    """抓該檔近期新聞標題，回傳 [(標題, 媒體), ...]，只取 3 天內。"""
-    try:
-        r = session.get(
-            "https://query1.finance.yahoo.com/v1/finance/search",
-            params={"q": ticker, "newsCount": 8, "quotesCount": 0,
-                    "enableFuzzyQuery": "false"},
-            timeout=30,
-        )
-        news = r.json().get("news", [])
-    except Exception:
-        return []
-
-    cutoff = datetime.now(timezone.utc).timestamp() - 3 * 86400
-    items = []
-    for n in news:
-        ts = n.get("providerPublishTime", 0)
-        if ts and ts < cutoff:
-            continue
-        title = html.unescape(n.get("title", "")).strip()
-        if title:
-            items.append((title, n.get("publisher", "")))
-        if len(items) >= max_items:
-            break
-    return items
-
-
 # ────────────────────────────── 格式化 ──────────────────────────────
 def fmt_pct(v):
     """漲跌幅 → 上漲 +、下跌 -，固定寬度 7。"""
@@ -180,140 +145,6 @@ def build_summary(groups, quotes, date_str):
             lines.append(f"`{ticker:<6}{fmt_pct(q.get('reg'))} {fmt_pct(q.get('post'))}`{flag}")
         lines.append("")
     lines.append("🔥 = 當日或盤後漲跌 ≥ 3%")
-    return "\n".join(lines).strip()
-
-
-def summarize_reasons(items):
-    """用 Google Gemini 把每檔的新聞標題濃縮成一句中文漲跌原因。
-
-    items: [{"ticker", "name", "reg", "post", "headlines": [標題,...]}, ...]
-    回傳 {ticker: 一句原因}，原因為空字串代表新聞與當日漲跌無明確關聯（略過不列）。
-    沒設 API key 或呼叫失敗則回傳 {}（由呼叫端退回原始標題）。
-    """
-    if not GEMINI_API_KEY:
-        print("No GEMINI_API_KEY — 退回顯示原始標題")
-        return {}
-
-    payload = [
-        {
-            "ticker": it["ticker"],
-            "name": it["name"],
-            "change": f"當日 {it['reg']:+.2f}%" if it["reg"] is not None else "",
-            "headlines": it["headlines"],
-        }
-        for it in items
-    ]
-    prompt = (
-        "你是美股財經分析助理。以下是今天漲跌超過 3% 的個股，附上各自近期新聞標題。\n"
-        "請逐檔判斷：這些新聞裡有沒有「明確且具體」解釋它今天漲跌的原因"
-        "（例如財報、財測、分析師升/降評、購併、產業利多/利空、訴訟、產品發表、"
-        "獲得大訂單等）。\n"
-        "- 有：消化新聞後，用一句繁體中文（35 字內）總結那個原因，不要列標題、不要分點。\n"
-        "- 沒有（新聞只是泛泛的估值/歷史回顧分析、與當日漲跌無明確關聯、或資訊不足"
-        "以判斷原因）：reason 直接留空字串 \"\"，代表這檔略過不列。\n"
-        "只根據提供的標題判斷，不要杜撰具體數字或不存在的事件。寧可留空，也不要硬湊。\n\n"
-        f"資料：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
-    )
-    # Gemini 結構化輸出（responseSchema 用 OpenAPI 子集、型別大寫）
-    schema = {
-        "type": "OBJECT",
-        "properties": {
-            "reasons": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "ticker": {"type": "STRING"},
-                        "reason": {"type": "STRING"},
-                    },
-                    "required": ["ticker", "reason"],
-                },
-            }
-        },
-        "required": ["reasons"],
-    }
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent")
-    try:
-        r = requests.post(
-            url,
-            headers={"x-goog-api-key": GEMINI_API_KEY},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": schema,
-                    "temperature": 0,
-                },
-            },
-            timeout=60,
-        )
-        r.raise_for_status()
-        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(text)
-        return {x["ticker"]: x["reason"] for x in data.get("reasons", [])}
-    except Exception as e:
-        detail = getattr(e, "response", None)
-        msg = detail.text[:200] if detail is not None else e
-        print(f"Gemini 摘要失敗，退回原始標題：{msg}")
-        return {}
-
-
-def build_reasons(groups, quotes, session):
-    """組出異動原因區塊；沒有任何異動回傳 None。"""
-    name_of = {t: n for _, stocks in groups for t, n in stocks}
-    movers = [(t, q) for t, q in quotes.items() if is_mover(q)]
-    if not movers:
-        return None
-    # 依當日漲跌幅絕對值由大到小排
-    movers.sort(key=lambda x: abs(x[1].get("reg") or 0), reverse=True)
-
-    # 先抓每檔新聞，再一次交給 Claude 濃縮成原因
-    news = {t: fetch_reason(session, t) for t, _ in movers}
-    summary_input = [
-        {
-            "ticker": t,
-            "name": name_of.get(t, t),
-            "reg": q.get("reg"),
-            "post": q.get("post"),
-            "headlines": [title for title, _pub in news[t]],
-        }
-        for t, q in movers
-    ]
-    reasons = summarize_reasons(summary_input)
-    llm_mode = bool(reasons)  # 有回傳代表 Claude 有跑（含「略過」的空字串）
-
-    lines = ["📌 *異動原因（漲跌 ≥ 3%）*", ""]
-    listed = 0
-    for ticker, q in movers:
-        name = name_of.get(ticker, ticker)
-        parts = []
-        if q.get("reg") is not None:
-            parts.append(f"當日 {q['reg']:+.2f}%")
-        if q.get("post") is not None and abs(q["post"]) >= MOVE_THRESHOLD:
-            parts.append(f"盤後 {q['post']:+.2f}%")
-        header = f"*{ticker}* {name}　{'｜'.join(parts)}"
-
-        if llm_mode:
-            reason = reasons.get(ticker, "").strip()
-            if not reason:
-                continue  # 新聞與當日漲跌無明確關聯 → 不列出
-            lines.append(header)
-            lines.append(f"  → {reason}")
-        else:
-            # 無 API key／呼叫失敗 → 退回原始新聞標題
-            lines.append(header)
-            if news[ticker]:
-                for title, pub in news[ticker]:
-                    pub_str = f" — {pub}" if pub else ""
-                    lines.append(f"  ・{title}{pub_str}")
-            else:
-                lines.append("  ・（查無近期相關新聞）")
-        lines.append("")
-        listed += 1
-
-    if listed == 0:
-        return None  # 全部都與當日漲跌無明確關聯
     return "\n".join(lines).strip()
 
 
@@ -369,10 +200,6 @@ def main():
 
     summary = build_summary(groups, quotes, now_str)
     send_telegram(summary)
-
-    reasons = build_reasons(groups, quotes, session)
-    if reasons:
-        send_telegram(reasons)
     print("Done.")
 
 
