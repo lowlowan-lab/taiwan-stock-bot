@@ -51,14 +51,13 @@ TX_ROW_PREFIX = "大台指期貨(TX)"
 #   ftse_q：富時台灣50，3/6/9/12 月第三個週五生效
 #   ftse_h：富時高股息，6/12 月第三個週五生效
 #   msci_h：MSCI ESG高股息30，5/11 月最後一個營業日生效
+#   before/after：調整期窗口＝生效日前 before、後 after 個交易日（生效日當天另標「生效」）
 ETF_REBALANCE = [
-    {"code": "0050", "name": "元大台灣50", "kind": "ftse_q"},
-    {"code": "006208", "name": "富邦台50", "kind": "ftse_q"},
-    {"code": "0056", "name": "元大高股息", "kind": "ftse_h"},
-    {"code": "00878", "name": "國泰永續高股息", "kind": "msci_h"},
+    {"code": "0050", "name": "元大台灣50", "kind": "ftse_q", "before": 0, "after": 0},    # 只有生效日當天
+    {"code": "006208", "name": "富邦台50", "kind": "ftse_q", "before": 0, "after": 4},    # 生效日(含)起 5 個交易日
+    {"code": "0056", "name": "元大高股息", "kind": "ftse_h", "before": 0, "after": 4},    # 生效日(含)起 5 個交易日
+    {"code": "00878", "name": "國泰永續高股息", "kind": "msci_h", "before": 2, "after": 5},
 ]
-ETF_WINDOW_BEFORE = 2  # 生效日前 N 個交易日（卡位）
-ETF_WINDOW_AFTER = 5   # 生效日後 N 個交易日（執行換股）
 
 # 00919（臺灣指數公司編，無乾淨生效日公式）：鎖定已知年份，依官方/新聞公告手動補列。
 # 格式：(code, name, 公告日, 生效日, 過渡期交易日數)；過渡期自生效日起（含）往後算交易日。
@@ -452,9 +451,9 @@ def fetch_etf_rebalances(today, cutoff):
                         "rank": int(etf["code"]),
                         "timing": "公告",
                     })
-            # 生效日 + 前後過渡窗口
+            # 生效日 + 前後過渡窗口（每檔各自的 before/after）
             for eff in _etf_effective_dates(etf["kind"], year):
-                for d in _trading_window(eff, ETF_WINDOW_BEFORE, ETF_WINDOW_AFTER):
+                for d in _trading_window(eff, etf["before"], etf["after"]):
                     if today <= d <= cutoff:
                         events.append({
                             "date": d,
