@@ -153,11 +153,11 @@ def fetch_reason(session, ticker, max_items=4):
 
 # ────────────────────────────── 格式化 ──────────────────────────────
 def fmt_pct(v):
-    """漲跌幅 → 帶箭頭、固定寬度的字串。"""
+    """漲跌幅 → 上漲 +、下跌 -，固定寬度 7。"""
     if v is None:
-        return "  　—  "
-    arrow = "▲" if v > 0 else "▼" if v < 0 else "－"
-    return f"{arrow}{abs(v):5.2f}%"
+        return f"{'—':>7}"
+    sign = "+" if v > 0 else "-" if v < 0 else " "
+    return f"{sign}{abs(v):.2f}%".rjust(7)
 
 
 def is_mover(q):
@@ -187,7 +187,8 @@ def summarize_reasons(items):
     """用 Claude 把每檔的新聞標題濃縮成一句中文漲跌原因。
 
     items: [{"ticker", "name", "reg", "post", "headlines": [標題,...]}, ...]
-    回傳 {ticker: 一句原因}；沒設 API key 或呼叫失敗則回傳 {}（由呼叫端退回原始標題）。
+    回傳 {ticker: 一句原因}，原因為空字串代表新聞與當日漲跌無明確關聯（略過不列）。
+    沒設 API key 或呼叫失敗則回傳 {}（由呼叫端退回原始標題）。
     """
     if not ANTHROPIC_API_KEY:
         print("No ANTHROPIC_API_KEY — 退回顯示原始標題")
@@ -209,9 +210,13 @@ def summarize_reasons(items):
     ]
     prompt = (
         "你是美股財經分析助理。以下是今天漲跌超過 3% 的個股，附上各自近期新聞標題。\n"
-        "請針對每一檔，用「一句」繁體中文（30 字內）說明它今天漲或跌的最可能原因，"
-        "依據新聞推斷。若標題與當日股價無關或資訊不足，原因填「新聞未明確說明，"
-        "可能為大盤連動或類股輪動」。只根據提供的標題，不要杜撰具體數字。\n\n"
+        "請逐檔判斷：這些新聞裡有沒有「明確且具體」解釋它今天漲跌的原因"
+        "（例如財報、財測、分析師升/降評、購併、產業利多/利空、訴訟、產品發表、"
+        "獲得大訂單等）。\n"
+        "- 有：消化新聞後，用一句繁體中文（35 字內）總結那個原因，不要列標題、不要分點。\n"
+        "- 沒有（新聞只是泛泛的估值/歷史回顧分析、與當日漲跌無明確關聯、或資訊不足"
+        "以判斷原因）：reason 直接留空字串 \"\"，代表這檔略過不列。\n"
+        "只根據提供的標題判斷，不要杜撰具體數字或不存在的事件。寧可留空，也不要硬湊。\n\n"
         f"資料：\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
     schema = {
@@ -274,8 +279,10 @@ def build_reasons(groups, quotes, session):
         for t, q in movers
     ]
     reasons = summarize_reasons(summary_input)
+    llm_mode = bool(reasons)  # 有回傳代表 Claude 有跑（含「略過」的空字串）
 
     lines = ["📌 *異動原因（漲跌 ≥ 3%）*", ""]
+    listed = 0
     for ticker, q in movers:
         name = name_of.get(ticker, ticker)
         parts = []
@@ -283,18 +290,28 @@ def build_reasons(groups, quotes, session):
             parts.append(f"當日 {q['reg']:+.2f}%")
         if q.get("post") is not None and abs(q["post"]) >= MOVE_THRESHOLD:
             parts.append(f"盤後 {q['post']:+.2f}%")
-        lines.append(f"*{ticker}* {name}　{'｜'.join(parts)}")
-        if ticker in reasons:
-            # Claude 濃縮版原因
-            lines.append(f"  → {reasons[ticker]}")
-        elif news[ticker]:
-            # 退回原始新聞標題
-            for title, pub in news[ticker]:
-                pub_str = f" — {pub}" if pub else ""
-                lines.append(f"  ・{title}{pub_str}")
+        header = f"*{ticker}* {name}　{'｜'.join(parts)}"
+
+        if llm_mode:
+            reason = reasons.get(ticker, "").strip()
+            if not reason:
+                continue  # 新聞與當日漲跌無明確關聯 → 不列出
+            lines.append(header)
+            lines.append(f"  → {reason}")
         else:
-            lines.append("  ・（查無近期相關新聞）")
+            # 無 API key／呼叫失敗 → 退回原始新聞標題
+            lines.append(header)
+            if news[ticker]:
+                for title, pub in news[ticker]:
+                    pub_str = f" — {pub}" if pub else ""
+                    lines.append(f"  ・{title}{pub_str}")
+            else:
+                lines.append("  ・（查無近期相關新聞）")
         lines.append("")
+        listed += 1
+
+    if listed == 0:
+        return None  # 全部都與當日漲跌無明確關聯
     return "\n".join(lines).strip()
 
 
