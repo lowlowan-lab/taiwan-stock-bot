@@ -1,6 +1,10 @@
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+from market_holidays import is_twse_closed
+
+TW_TZ = timezone(timedelta(hours=8))  # 台灣時區（Actions 跑在 UTC）
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -118,7 +122,12 @@ def send_telegram(text):
     print(f"Telegram: {r.status_code}")
 
 def main():
-    date_str = datetime.now().strftime("%Y/%m/%d")
+    today = datetime.now(TW_TZ).date()
+    if is_twse_closed(today):
+        print(f"{today} 台股休市，不推播三大法人買賣超。")
+        return
+
+    date_str = today.strftime("%Y/%m/%d")
     header = f"📊 *三大法人買賣超排行*\n🗓 {date_str}"
 
     totals = fetch_institutional_totals()

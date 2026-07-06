@@ -4,6 +4,8 @@ import requests
 from datetime import datetime, timedelta, date
 from bs4 import BeautifulSoup
 
+import market_holidays
+
 WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_watchlist.txt")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -87,7 +89,7 @@ ETF_REVIEW_REMINDER = (
 )
 
 # 事件類型顯示順序
-EVENT_TYPE_ORDER = ["法說會", "股東會", "美股", "流動性事件"]
+EVENT_TYPE_ORDER = ["市場休市", "法說會", "股東會", "美股", "流動性事件"]
 
 
 # ── 市值排名 (上市200 + 上櫃100) ───────────────────────────────────────────────
@@ -511,6 +513,24 @@ def fetch_fixed_rebalances(today, cutoff):
     return events
 
 
+# ── 市場休市 (台股 + 美股) ──────────────────────────────────────────────────────
+
+def fetch_market_holidays(today, cutoff):
+    """台股（證交所官方）與美股（NYSE 規則）休市日，落在區間內就加入。"""
+    events = []
+    for year in sorted({today.year, cutoff.year}):
+        for d, name in market_holidays.twse_holidays(year).items():
+            if today <= d <= cutoff:
+                events.append({"date": d, "code": "", "name": f"台股休市（{name}）",
+                               "event_type": "市場休市", "rank": 0, "timing": ""})
+        for d, name in market_holidays.us_market_holidays(year).items():
+            if today <= d <= cutoff:
+                events.append({"date": d, "code": "", "name": f"美股休市（{name}）",
+                               "event_type": "市場休市", "rank": 1, "timing": ""})
+    print(f"Market holidays in window: {len(events)}")
+    return events
+
+
 # ── 訊息格式 & 發送 ─────────────────────────────────────────────────────────────
 
 def _esc(text):
@@ -602,6 +622,9 @@ def main():
     print("Expanding fixed (00919) rebalance windows (流動性事件)...")
     fixed_events = fetch_fixed_rebalances(today, cutoff)
     filtered += fixed_events
+
+    print("Fetching market holidays (市場休市)...")
+    filtered += fetch_market_holidays(today, cutoff)
 
     events_by_date: dict = {}
     for ev in filtered:

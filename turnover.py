@@ -4,6 +4,8 @@ import os
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 
+from market_holidays import is_twse_closed
+
 TW_TZ = timezone(timedelta(hours=8))  # 台灣時區（GitHub Actions 跑在 UTC，需手動 +8）
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -108,6 +110,11 @@ def send_telegram(text):
     print(f"Telegram: {r.status_code} {r.text[:100]}")
 
 def main():
+    today = datetime.now(TW_TZ).date()
+    if is_twse_closed(today):
+        print(f"{today} 台股休市，不推播成交金額排行。")
+        return
+
     now_str = datetime.now(TW_TZ).strftime("%Y/%m/%d %H:%M")
     print(f"Fetching turnover rank at {now_str}...")
 

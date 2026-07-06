@@ -16,6 +16,8 @@ import os
 import requests
 from datetime import datetime, timezone, timedelta
 
+from market_holidays import us_market_holidays
+
 TW_TZ = timezone(timedelta(hours=8))  # 台灣時區（Actions 跑在 UTC，需手動 +8）
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -174,9 +176,25 @@ def send_telegram(text):
         print(f"Telegram: {r.status_code} {r.text[:120]}")
 
 
+def recap_us_date(today_tw):
+    """本次 recap 的美股交易日：台灣今天往前一天，跨過週末。"""
+    d = today_tw - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def main():
     now_str = datetime.now(TW_TZ).strftime("%Y/%m/%d %H:%M")
     print(f"US daily report at {now_str}")
+
+    # 昨日美股休市（國定假日）→ 不推總結，改推一則休市提示
+    recap = recap_us_date(datetime.now(TW_TZ).date())
+    holiday = us_market_holidays(recap.year).get(recap)
+    if holiday:
+        send_telegram(f"🇺🇸 *美股昨日休市*\n🗓 {recap:%Y/%m/%d}（{holiday}）")
+        print(f"US market closed on {recap} ({holiday}); notice sent.")
+        return
 
     groups = parse_watchlist()
     tickers = [t for _, stocks in groups for t, _ in stocks]
