@@ -1,12 +1,13 @@
 import os
 import re
 import requests
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from bs4 import BeautifulSoup
 
 import market_holidays
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_watchlist.txt")
+ASIA_WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asia_watchlist.txt")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -44,6 +45,10 @@ US_EARNINGS_URL = "https://api.nasdaq.com/api/calendar/earnings"
 
 # TradingEconomics 美國經濟行事曆（impact 三星＝高影響事件）
 TE_US_CALENDAR_URL = "https://tradingeconomics.com/united-states/calendar"
+
+# Yahoo Finance 報價（亞股財報日；免費，需 cookie + crumb）
+YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+TW_TZ = timezone(timedelta(hours=8))
 
 # 雲達期貨交易行事曆 API（台指期結算日）
 YUANTA_CAL_URL = "https://www.yuantafutures.com.tw/api/TradeCal01"
@@ -89,7 +94,7 @@ ETF_REVIEW_REMINDER = (
 )
 
 # 事件類型顯示順序
-EVENT_TYPE_ORDER = ["市場休市", "法說會", "股東會", "美股", "流動性事件"]
+EVENT_TYPE_ORDER = ["市場休市", "法說會", "股東會", "美股", "亞股", "流動性事件"]
 
 
 # ── 市值排名 (上市200 + 上櫃100) ───────────────────────────────────────────────
@@ -334,6 +339,71 @@ def fetch_us_econ_events(today, cutoff):
         print(f"US econ (3-star): {total3} in page, {len(events)} in window")
     except Exception as e:
         print(f"US econ fetch error: {e}")
+    return events
+
+
+# ── 亞股 (日／韓個股財報，Yahoo Finance) ────────────────────────────────────────
+
+def load_asia_watchlist():
+    """讀 asia_watchlist.txt，回傳 [(symbol, name), ...]（保留順序）。"""
+    out = []
+    try:
+        with open(ASIA_WATCHLIST_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                sym, _, name = line.partition(",")
+                sym = sym.strip()
+                if sym:
+                    out.append((sym, name.strip() or sym))
+        print(f"Asia watchlist: {len(out)} tickers loaded")
+    except Exception as e:
+        print(f"Asia watchlist load error: {e}")
+    return out
+
+
+def fetch_asia_earnings(today, cutoff, watchlist):
+    """用 Yahoo Finance 抓亞股下一次財報日，落在區間內的加入（估計日期標『預估』）。"""
+    events = []
+    if not watchlist:
+        return events
+    order = {sym: i for i, (sym, _) in enumerate(watchlist)}
+    names = dict(watchlist)
+    symbols = [sym for sym, _ in watchlist]
+
+    try:
+        s = requests.Session()
+        s.headers.update(HEADERS)
+        s.get("https://fc.yahoo.com", timeout=30)
+        crumb = s.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=30).text.strip()
+
+        results = []
+        for i in range(0, len(symbols), 40):
+            r = s.get(YAHOO_QUOTE_URL,
+                      params={"symbols": ",".join(symbols[i:i + 40]), "crumb": crumb},
+                      timeout=30)
+            results += r.json().get("quoteResponse", {}).get("result", [])
+
+        for q in results:
+            sym = q.get("symbol")
+            ts = q.get("earningsTimestampStart") or q.get("earningsTimestamp")
+            if not ts:
+                continue
+            ev_date = datetime.fromtimestamp(ts, TW_TZ).date()
+            if not (today <= ev_date <= cutoff):
+                continue
+            events.append({
+                "date": ev_date,
+                "code": sym.split(".")[0],
+                "name": names.get(sym, sym),
+                "event_type": "亞股",
+                "rank": order.get(sym, 1e9),
+                "timing": "預估" if q.get("isEarningsDateEstimate") else "",
+            })
+        print(f"Asia earnings: {len(results)} quotes, {len(events)} in window")
+    except Exception as e:
+        print(f"Asia earnings fetch error: {e}")
     return events
 
 
@@ -610,6 +680,10 @@ def main():
     print("Fetching US economic events (TradingEconomics 3-star)...")
     econ_events = fetch_us_econ_events(today, cutoff)
     filtered += econ_events
+
+    print("Fetching Asia earnings (亞股 watchlist)...")
+    asia_events = fetch_asia_earnings(today, cutoff, load_asia_watchlist())
+    filtered += asia_events
 
     print("Fetching TX futures settlement (流動性事件)...")
     tx_events = fetch_tx_settlements(today, cutoff)

@@ -1,0 +1,102 @@
+# 亞股（日／韓）自選清單 — 一行一檔，格式：Yahoo代碼,公司名稱
+# 日股後綴 .T；韓股 KOSPI .KS、KOSDAQ .KQ（已解析好）。增減直接改本檔。
+# 註：財報日取自 Yahoo Finance；部分韓國 KOSDAQ 小型股 Yahoo 無可靠財報日，可能不會顯示。
+
+# 記憶體
+005930.KS,Samsung Electronics
+000660.KS,SK Hynix
+285A.T,Kioxia
+222800.KQ,Simmtech
+042700.KS,Hanmi Semiconductor
+
+# 晶圓代工／IC 設計
+000990.KS,DB HiTek
+108320.KS,LX Semicon
+6723.T,Renesas
+6963.T,Rohm
+6526.T,Socionext
+6758.T,Sony
+6503.T,三菱電機
+6504.T,富士電機
+
+# ABF 載板／PCB／光罩
+4062.T,Ibiden
+2802.T,味之素 Ajinomoto
+4182.T,三菱瓦斯化學
+7911.T,Toppan
+7912.T,大日本印刷 DNP
+009150.KS,Samsung Electro-Mechanics
+011070.KS,LG Innotek
+353200.KS,Daeduck Electronics
+007810.KS,Korea Circuit
+051370.KQ,Interflex
+
+# 被動元件
+6981.T,Murata
+6762.T,TDK
+6976.T,Taiyo Yuden
+6971.T,Kyocera
+6999.T,KOA
+6996.T,Nichicon
+6997.T,Nippon Chemi-Con
+001820.KS,Samwha Capacitor
+
+# 半導體設備
+8035.T,Tokyo Electron
+6857.T,Advantest
+6146.T,Disco
+6920.T,Lasertec
+7735.T,Screen Holdings
+6525.T,Kokusai Electric
+7729.T,Tokyo Seimitsu
+6315.T,Towa
+6728.T,Ulvac
+058470.KQ,Leeno
+095340.KQ,ISC
+131970.KQ,Doosan Tesna
+033640.KQ,Nepes
+036930.KQ,Jusung
+240810.KQ,Wonik IPS
+403870.KQ,HPSP
+039030.KQ,EO Technics
+
+# 半導體材料
+4063.T,信越化學
+3436.T,SUMCO
+4186.T,Tokyo Ohka
+4004.T,Resonac
+7741.T,HOYA
+5201.T,AGC
+6988.T,Nitto Denko
+4203.T,住友電木
+6966.T,Mitsui High-tec
+5310.T,東洋炭素
+5301.T,東海碳素
+6890.T,Ferrotec
+357780.KQ,Soulbrain
+005290.KQ,Dongjin Semichem
+011790.KS,SKC
+336370.KS,Solus Advanced Materials
+
+# 面板／顯示
+034220.KS,LG Display
+6740.T,Japan Display
+6753.T,Sharp
+4005.T,住友化學
+
+# 連接器／光通訊／散熱／AI 電力
+6806.T,Hirose
+6807.T,JAE
+5803.T,Fujikura
+5802.T,住友電工
+5801.T,古河電工
+6594.T,Nidec
+6516.T,Sanyo Denki
+6479.T,Minebea Mitsumi
+010120.KS,LS Electric
+267260.KS,HD Hyundai Electric
+
+# 機器人／自動化
+6954.T,Fanuc
+6506.T,Yaskawa
+6324.T,Harmonic Drive
