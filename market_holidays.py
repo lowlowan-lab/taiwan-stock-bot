@@ -82,7 +82,19 @@ def _easter(year):
 
 
 def us_market_holidays(year):
-    """NYSE/NASDAQ 全天休市日 {date: 英文名}。（不含半日提早收盤）"""
+    """NYSE/NASDAQ 全天休市日 {date: 名稱}。
+
+    優先用 exchange_calendars（XNYS，含國殤日等臨時休市，較準）；
+    套件不可用時退回下方規則計算。
+    """
+    ec = _ec_holidays("XNYS", year)
+    if ec:
+        return ec
+    return _us_holidays_computed(year)
+
+
+def _us_holidays_computed(year):
+    """規則計算的 NYSE 固定假日（fallback）。（不含半日提早收盤／臨時休市）"""
     hol = {}
     # 元旦：落週六則不補假（不像其他假日往前補週五）
     ny = date(year, 1, 1)
@@ -108,3 +120,74 @@ def is_us_closed(d):
     if d.weekday() >= 5:
         return True
     return d in us_market_holidays(d.year)
+
+
+# ── 日／韓／港（exchange_calendars 套件，延遲載入）────────────────────────────────
+# 只有 calendar_events 的「市場休市」類別會用到；turnover/scraper/us_daily 不碰，
+# 因此把重量級的 exchange_calendars/pandas 依賴延遲到函式內載入。
+
+_EC_CACHE = {}
+
+
+def _ec_holidays(cal_code, year):
+    """用 exchange_calendars 取某交易所該年的假日 {date: 名稱}（只留平日）。"""
+    key = (cal_code, year)
+    if key in _EC_CACHE:
+        return _EC_CACHE[key]
+    out = {}
+    try:
+        import exchange_calendars as xc
+        import pandas as pd
+        cal = xc.get_calendar(cal_code)
+        start, end = pd.Timestamp(f"{year}-01-01"), pd.Timestamp(f"{year}-12-31")
+        for d, name in cal.regular_holidays.holidays(start, end, return_name=True).items():
+            if d.weekday() < 5:
+                out[d.date()] = str(name).split(" (")[0]  # 去掉 "(2003 onwards)" 之類尾綴
+        for t in cal.adhoc_holidays:
+            ts = pd.Timestamp(t)
+            if start <= ts <= end and ts.weekday() < 5:
+                out.setdefault(ts.date(), "")
+    except Exception as e:
+        print(f"{cal_code} holiday error: {e}")
+    _EC_CACHE[key] = out
+    return out
+
+
+def jpx_holidays(year):
+    return _ec_holidays("XTKS", year)   # 東京
+
+
+def krx_holidays(year):
+    return _ec_holidays("XKRX", year)   # 韓國
+
+
+def hkex_holidays(year):
+    return _ec_holidays("XHKG", year)   # 香港
+
+
+# ── 中國（timor.tech，免費 JSON，含連假展開）──────────────────────────────────────
+
+CHINA_HOLIDAY_URL = "https://timor.tech/api/holiday/year/"
+_china_cache = {}
+
+
+def sse_holidays(year):
+    """A 股休市日 {date: 名稱}（只留平日；忽略補班上班日）。"""
+    if year in _china_cache:
+        return _china_cache[year]
+    out = {}
+    try:
+        r = requests.get(f"{CHINA_HOLIDAY_URL}{year}", headers=HEADERS, timeout=30)
+        for v in (r.json().get("holiday") or {}).values():
+            if not v.get("holiday"):      # 補班（上班日）→ 非休市
+                continue
+            try:
+                d = date.fromisoformat(v["date"])
+            except (ValueError, KeyError):
+                continue
+            if d.weekday() < 5:
+                out[d] = v.get("name", "")
+    except Exception as e:
+        print(f"China holiday fetch error: {e}")
+    _china_cache[year] = out
+    return out

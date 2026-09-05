@@ -586,17 +586,23 @@ def fetch_fixed_rebalances(today, cutoff):
 # ── 市場休市 (台股 + 美股) ──────────────────────────────────────────────────────
 
 def fetch_market_holidays(today, cutoff):
-    """台股（證交所官方）與美股（NYSE 規則）休市日，落在區間內就加入。"""
+    """六大市場休市日（台/美/日/韓/中/港），落在區間內就加入。"""
+    markets = [
+        (market_holidays.twse_holidays, "台股", 0),
+        (market_holidays.us_market_holidays, "美股", 1),
+        (market_holidays.jpx_holidays, "日股", 2),
+        (market_holidays.krx_holidays, "韓股", 3),
+        (market_holidays.sse_holidays, "陸股", 4),
+        (market_holidays.hkex_holidays, "港股", 5),
+    ]
     events = []
     for year in sorted({today.year, cutoff.year}):
-        for d, name in market_holidays.twse_holidays(year).items():
-            if today <= d <= cutoff:
-                events.append({"date": d, "code": "", "name": f"台股休市（{name}）",
-                               "event_type": "市場休市", "rank": 0, "timing": ""})
-        for d, name in market_holidays.us_market_holidays(year).items():
-            if today <= d <= cutoff:
-                events.append({"date": d, "code": "", "name": f"美股休市（{name}）",
-                               "event_type": "市場休市", "rank": 1, "timing": ""})
+        for func, label, rank in markets:
+            for d, name in func(year).items():
+                if today <= d <= cutoff:
+                    disp = f"{label}休市（{name}）" if name else f"{label}休市"
+                    events.append({"date": d, "code": "", "name": disp,
+                                   "event_type": "市場休市", "rank": rank, "timing": ""})
     print(f"Market holidays in window: {len(events)}")
     return events
 
