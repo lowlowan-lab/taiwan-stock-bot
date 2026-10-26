@@ -1,8 +1,9 @@
 """台股連假・國際股市前瞻推播。
 
-每天晚上 19:00（台灣）由 cron 觸發自我判斷：
-  若「今天台股休市、明天台股開盤、且這段休市是連假（含國定假日、連續≥2天）」，
+每天早上 06:00（台灣）由 cron 觸發自我判斷：
+  若「今天台股開盤、昨天台股休市、且這段休市是連假（含國定假日、連續≥2天）」，
   就推播連假期間各國指數自台股最後收盤起的累計漲跌幅；否則保持安靜。
+  06:00 時美股前一晚已收盤，連假最後一個美股交易日也會算進去。
 
 指數（Yahoo Finance，免費）：道瓊 ^DJI、NASDAQ ^IXIC、費半 ^SOX、
   KOSPI ^KS11、TOPIX（用 1306.T ETF 代理，Yahoo 無指數本身）、日經225 ^N225。
@@ -36,20 +37,21 @@ INDICES = [
 # ── 連假偵測 ────────────────────────────────────────────────────────────────────
 
 def holiday_streak(today):
-    """若今天是連假的最後一天（明天開盤），回傳 (休市起始日, 最後交易日)；否則 None。
+    """若今天是連假後第一個開盤日，回傳 (休市起始日, 最後交易日)；否則 None。
 
-    條件：今天台股休市、明天台股開盤、休市連續 ≥2 天且含至少一個國定假日。
+    條件：今天台股開盤、昨天休市、休市連續 ≥2 天且含至少一個國定假日。
     """
-    if not is_twse_closed(today):
+    if is_twse_closed(today):
         return None
-    if is_twse_closed(today + timedelta(days=1)):
-        return None  # 明天還沒開盤 → 還不是前一晚
+    end = today - timedelta(days=1)
+    if not is_twse_closed(end):
+        return None  # 昨天有開盤 → 不是收假日
 
     # 往回數連續休市日
-    start = today
+    start = end
     while is_twse_closed(start - timedelta(days=1)):
         start -= timedelta(days=1)
-    streak_days = (today - start).days + 1
+    streak_days = (end - start).days + 1
     has_holiday = any(
         (start + timedelta(days=i)) in twse_holidays((start + timedelta(days=i)).year)
         for i in range(streak_days)
@@ -131,10 +133,10 @@ def main():
     today = datetime.now(TW_TZ).date()
     streak = holiday_streak(today)
     if not streak:
-        print(f"{today} 非連假前一晚，保持安靜。")
+        print(f"{today} 非連假後首個開盤日，保持安靜。")
         return
     _, last_trading_day = streak
-    print(f"連假偵測：台股最後交易日 {last_trading_day}，明日開盤。")
+    print(f"連假偵測：台股最後交易日 {last_trading_day}，今日開盤。")
 
     rows = []
     for symbol, label in INDICES:
